@@ -129,13 +129,19 @@ let navLight: THREE.Mesh;
   tv.position.set(-2.4, 0, 0);
   hullGroup.add(tv); // rudder
 
-  // shrouded thruster
+  // shrouded thruster — the stretched tail cap reaches x≈-3.72, so the
+  // whole assembly lives aft of that or it's swallowed by the hull
+  const PROP_X = -3.95;
+  const shaft = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, 0.5, 8), trimMat));
+  shaft.rotation.z = Math.PI / 2;
+  shaft.position.x = -3.65; // bridges tail tip to the shroud
+  hullGroup.add(shaft);
   const shroud = addShadow(new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.09, 10, 24), trimMat));
   shroud.rotation.y = Math.PI / 2;
-  shroud.position.x = -3.15;
+  shroud.position.x = PROP_X;
   hullGroup.add(shroud);
   propGroup = new THREE.Group();
-  propGroup.position.x = -3.15;
+  propGroup.position.x = PROP_X;
   // brighter steel so the spinning blades actually read in the dark
   const propMat = new THREE.MeshStandardMaterial({ color: 0x424a52, roughness: 0.5, metalness: 0.55 });
   for (let i = 0; i < 4; i++) {
@@ -1143,7 +1149,7 @@ function animate(): void {
         b.userData.life = 0;
         b.position
           .copy(sub.pos)
-          .addScaledVector(forward, -3.2)
+          .addScaledVector(forward, -4.15) // at the prop, aft of the tail tip
           .add(
             new THREE.Vector3(
               (Math.random() - 0.5) * 0.4,
