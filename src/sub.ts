@@ -719,13 +719,20 @@ const bubbles: THREE.Mesh[] = [];
 type Mode = "PILOT" | "MANIPULATOR";
 let mode: Mode = "PILOT";
 
+const STOW_HOLD_MS = 500;
 const keys = new Set<string>();
 let tabDownAt = 0;
+let tabHeld = false;
+let tabConsumed = false; // stow already fired for this hold
 window.addEventListener("keydown", (e) => {
   keys.add(e.code);
   if (e.code === "Tab") {
     e.preventDefault();
-    if (!e.repeat) tabDownAt = performance.now();
+    if (!e.repeat) {
+      tabDownAt = performance.now();
+      tabHeld = true;
+      tabConsumed = false;
+    }
   }
   if (e.code === "Space") {
     e.preventDefault();
@@ -735,9 +742,9 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("keyup", (e) => {
   keys.delete(e.code);
   if (e.code === "Tab") {
-    // short press: switch mode (arm holds its pose). Long press: stow arm.
-    if (performance.now() - tabDownAt >= 500) stowArm();
-    else toggleMode();
+    tabHeld = false;
+    // released before the stow bar filled: it's a mode switch
+    if (!tabConsumed && performance.now() - tabDownAt < STOW_HOLD_MS) toggleMode();
   }
 });
 
@@ -819,6 +826,8 @@ const DPAD_DOWN = 13;
 // ------------------------------------------------------------------- HUD ---
 const modeEl = document.getElementById("mode")!;
 const clawHud = document.getElementById("clawState")!;
+const stowEl = document.getElementById("stow")!;
+const stowFill = document.getElementById("stowFill")!;
 const depthEl = document.getElementById("depth")!;
 const headEl = document.getElementById("heading")!;
 const contactEl = document.getElementById("contact")!;
@@ -912,6 +921,7 @@ let throttle = 0; // |thrust input|, drives prop spin + wake turbulence
 let propSpin = 0;
 let padYWas = false; // gamepad Y long-press tracking
 let padYTime = 0;
+let padYConsumed = false;
 
 // ------------------------------------------------------------------- post ---
 const composer = new EffectComposer(renderer);
@@ -977,14 +987,20 @@ function animate(): void {
 
   const pad = readPad();
   if (pad) {
-    // Y: short press toggles mode, long press (>=0.5s) stows the arm
+    // Y: short press toggles mode; holding fills the stow bar, which fires
+    // the moment it completes (release early = mode switch)
     const yNow = pad.held(3);
-    if (yNow) padYTime += dt;
-    else if (padYWas) {
-      if (padYTime >= 0.5) stowArm();
-      else toggleMode();
+    if (yNow) {
+      padYTime += dt;
+      if (padYTime >= STOW_HOLD_MS / 1000 && !padYConsumed) {
+        stowArm();
+        padYConsumed = true;
+      }
+    } else {
+      if (padYWas && !padYConsumed) toggleMode();
       padYTime = 0;
-    } else padYTime = 0;
+      padYConsumed = false;
+    }
     padYWas = yNow;
     if (pad.pressed(0)) toggleClaw(); // A — grip, in either mode
     orbitYaw -= pad.rx * 2.2 * dt;
@@ -1265,6 +1281,23 @@ function animate(): void {
   causticsMat.uniforms.time.value = t;
   causticsMat.uniforms.camPos.value.copy(camera.position);
   underwaterPass.uniforms.time.value = t;
+
+  // --- stow progress bar: fills while Tab / pad Y is held; stow fires the
+  // moment it completes ---
+  let stowP = 0;
+  if (tabHeld && !tabConsumed) {
+    stowP = (performance.now() - tabDownAt) / STOW_HOLD_MS;
+    if (stowP >= 1) {
+      stowArm();
+      tabConsumed = true;
+      stowP = 0;
+    }
+  }
+  if (padYWas && !padYConsumed) {
+    stowP = Math.max(stowP, padYTime / (STOW_HOLD_MS / 1000));
+  }
+  stowEl.style.display = stowP > 0.12 ? "block" : "none";
+  stowFill.style.width = `${Math.min(stowP, 1) * 100}%`;
 
   // restore claw HUD after a transient flash (e.g. "ARM STOWED")
   if (clawFlashUntil && performance.now() > clawFlashUntil) {

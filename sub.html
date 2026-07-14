@@ -39,6 +39,12 @@
       .frame::after{bottom:-1px;right:-1px;border-width:0 2px 2px 0;}
       #rec{display:inline-block;width:8px;height:8px;border-radius:50%;
         background:#c0392b;margin-right:6px;animation:blink 1.6s steps(1) infinite;}
+      #stow{margin-top:6px;display:none;}
+      #stowTrack{
+        width:150px;height:5px;margin-top:3px;
+        border:1px solid rgba(143,214,200,.4);
+      }
+      #stowFill{height:100%;width:0%;background:var(--warn);}
       #pip{
         position:absolute;left:14px;bottom:96px;width:300px;height:170px;
         border:1px solid rgba(143,214,200,.4);
@@ -66,6 +72,10 @@
         <div class="val" id="mode">PILOT</div>
         <div class="label">MANIPULATOR</div>
         <div class="val" id="clawState">CLAW OPEN</div>
+        <div id="stow">
+          <div class="label">STOWING ARM</div>
+          <div id="stowTrack"><div id="stowFill"></div></div>
+        </div>
       </div>
       <div class="corner tr">
         <div class="label">DEPTH</div>
