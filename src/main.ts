@@ -413,7 +413,10 @@ function onAssetsLoaded() {
   const atlas = assetManager.require("Cade_Swimming.atlas");
   const atlasLoader = new spine.AtlasAttachmentLoader(atlas);
   const binary = new spine.SkeletonBinary(atlasLoader);
-  binary.scale = 0.0032; // Spine px -> world units; diver ≈ 1.9u tall
+  // Spine px -> world units. Sized so the diver fits the SHELLTER's door and
+  // furniture (body length ≈ bed length); exact standing-mode calibration
+  // happens in M1 with the 1.6-scale standing rig from player.tscn.
+  binary.scale = 0.0027;
   const skeletonData = binary.readSkeletonData(
     assetManager.require("Cade_Swimming.skel"),
   );
