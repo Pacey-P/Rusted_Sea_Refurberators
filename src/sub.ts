@@ -1,19 +1,17 @@
 /**
- * Rusted Sea — 3D sub prototype ("the game as it began").
+ * Rusted Sea — ROV BLACKFIN prototype.
  *
- * Pilot a rusty submarine, built from primitives, through black water.
- * One bubble of visibility, silhouettes at the edge of the beam. A
- * two-joint IK claw hangs off the nose, reaching for things. A wrecked
- * Sea Major (the old prototype's .glb — fine for static dressing, since
- * nothing depends on its baked orientation) lies on the seafloor as the
- * salvage target.
+ * The user's reference design (matte stealth-black sub, FABRIK manipulator
+ * arm, patrol drone sentinel, diegetic ROV HUD) merged with this project's
+ * piloting physics and post stack. Reference targeted three r128; this port
+ * runs on r170, so all light intensities are rescaled to physical units.
  *
- * The hull is procedural rather than an imported model specifically so
- * forward/up and every mount point (headlight, claw shoulder, camera) are
- * numbers we chose, not numbers we reverse-engineered from someone else's
- * export — that's what made the .glb version fiddly to wire up correctly.
- *
- * W/S thrust, A/D turn, R/F depth, drag mouse to orbit, E reach-and-grab.
+ * Two control modes, toggled with TAB (keyboard) or Y (gamepad):
+ *   PILOT       — W/S thrust, A/D turn, R/F depth. Pad: left stick fly,
+ *                 triggers depth. The arm folds in.
+ *   MANIPULATOR — the sub coasts; mouse (or left stick) guides the claw,
+ *                 click / Space / pad A toggles grip.
+ * Drag orbits the camera in both modes; wheel adjusts range.
  */
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
@@ -23,17 +21,22 @@ import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 // ----------------------------------------------------------------- setup ---
+const params = new URLSearchParams(location.search);
+
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.25;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
+const WATER = new THREE.Color("#03121c");
 const scene = new THREE.Scene();
-scene.background = new THREE.Color("#020a10");
-scene.fog = new THREE.FogExp2(new THREE.Color("#020a10"), 0.026);
+scene.background = new THREE.Color("#020a12");
+scene.fog = new THREE.FogExp2(WATER, 0.05);
 
 const camera = new THREE.PerspectiveCamera(
   55,
@@ -43,375 +46,573 @@ const camera = new THREE.PerspectiveCamera(
 );
 
 // ---------------------------------------------------------------- lights ---
-const params0 = new URLSearchParams(location.search);
-scene.add(new THREE.HemisphereLight(0x1c3a44, 0x000000, params0.has("lit") ? 1.1 : 0.14));
-if (params0.has("lit")) {
+scene.add(new THREE.AmbientLight(0x0d2634, params.has("lit") ? 4 : 0.7));
+if (params.has("lit")) {
   const key = new THREE.DirectionalLight(0xffffff, 1.6);
   key.position.set(5, 8, 6);
   scene.add(key);
 }
+const moon = new THREE.DirectionalLight(0x3f6f8a, 0.35); // faint surface glow
+moon.position.set(4, 30, -6);
+scene.add(moon);
+const rim = new THREE.PointLight(0x1c4a5e, 14, 40, 1.8);
+rim.position.set(-10, 4, -8);
+scene.add(rim);
 
-// the sub's headlight — the only real light in the world
-const headlight = new THREE.SpotLight(0xcfe8ff, 260, 55, 0.36, 0.5, 1.5);
-const headlightTarget = new THREE.Object3D();
-scene.add(headlightTarget);
-headlight.target = headlightTarget;
+// ------------------------------------------------------------- materials ---
+const hullMat = new THREE.MeshStandardMaterial({ color: 0x0b0d0f, roughness: 0.96, metalness: 0.12 });
+const panelMat = new THREE.MeshStandardMaterial({ color: 0x121517, roughness: 0.9, metalness: 0.18 });
+const trimMat = new THREE.MeshStandardMaterial({ color: 0x1a1e21, roughness: 0.85, metalness: 0.25 });
 
-// faint warm running light on the sub itself so its own hull reads
-const runningLight = new THREE.PointLight(0xffb066, 5, 10, 1.8);
+function addShadow<T extends THREE.Mesh>(m: T): T {
+  m.castShadow = true;
+  m.receiveShadow = true;
+  return m;
+}
 
-// ------------------------------------------------------------- player sub ---
-// Built by hand, nose at +Z, up at +Y, centered on the group origin — every
-// number below is a coordinate we chose, so headlight/claw/camera mounts
-// are exact instead of measured off a screenshot.
-const HULL_LEN = 6.0; // cylindrical section length
-const HULL_R = 1.05;
-const NOSE_Z = HULL_LEN / 2 + HULL_R; // = 4.05, the true bow tip
-
-const rust = new THREE.MeshStandardMaterial({ color: 0x5b4636, roughness: 0.9, metalness: 0.35 });
-const rustDark = new THREE.MeshStandardMaterial({ color: 0x2e241c, roughness: 0.95, metalness: 0.2 });
-const brass = new THREE.MeshStandardMaterial({ color: 0x8a6a3a, roughness: 0.6, metalness: 0.6 });
-
+// ------------------------------------------------------------ player sub ---
+// The reference builds the Blackfin nose-toward-+X; our physics convention is
+// nose +Z. hullGroup wears the -90° yaw so the reference geometry can be kept
+// verbatim while subGroup's +Z stays "forward".
 const subGroup = new THREE.Group();
 scene.add(subGroup);
-subGroup.add(headlight, runningLight);
-runningLight.position.set(0, 1.2, -1);
+const hullGroup = new THREE.Group();
+hullGroup.rotation.y = -Math.PI / 2; // reference +X -> our +Z
+subGroup.add(hullGroup);
 
+let propGroup: THREE.Group;
+let navLight: THREE.Mesh;
 {
-  // Hull as a lathe profile, not a capsule: a blunt nose, a ribbed
-  // mid-section with slight radius steps (plating), and a tapered stern.
-  // A plain capsule reads as a smooth sausage; the radius steps and rib
-  // rings are what make the eye read "riveted machine."
-  const profile: THREE.Vector2[] = [];
-  profile.push(new THREE.Vector2(0.0, -HULL_LEN / 2 - HULL_R)); // stern point
-  profile.push(new THREE.Vector2(HULL_R * 0.55, -HULL_LEN / 2 - HULL_R * 0.55));
-  profile.push(new THREE.Vector2(HULL_R * 0.92, -HULL_LEN / 2 - HULL_R * 0.1));
-  const ribs = 5;
-  for (let i = 0; i <= ribs; i++) {
-    const z = -HULL_LEN / 2 + (HULL_LEN * i) / ribs;
-    const step = i % 2 === 0 ? 1.0 : 0.94; // alternating plating steps
-    profile.push(new THREE.Vector2(HULL_R * step, z));
-  }
-  profile.push(new THREE.Vector2(HULL_R * 0.85, HULL_LEN / 2 + HULL_R * 0.18));
-  profile.push(new THREE.Vector2(HULL_R * 0.62, HULL_LEN / 2 + HULL_R * 0.42));
-  profile.push(new THREE.Vector2(HULL_R * 0.32, HULL_LEN / 2 + HULL_R * 0.68));
-  profile.push(new THREE.Vector2(0.0, HULL_LEN / 2 + HULL_R * 0.88)); // bow point
-
-  const hull = new THREE.Mesh(new THREE.LatheGeometry(profile, 24), rust);
-  hull.rotation.x = -Math.PI / 2; // lathe axis is Y; bow (+Y end) -> +Z
-  subGroup.add(hull);
-
-  // a raised keel strip and a hatch disc, purely to break up the silhouette
-  const keel = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, HULL_LEN * 0.8), rustDark);
-  keel.position.set(0, -HULL_R - 0.02, 0.2);
-  subGroup.add(keel);
-  const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.06, 16), rustDark);
-  hatch.rotation.x = Math.PI / 2;
-  hatch.position.set(0, HULL_R * 0.98, -0.6);
-  subGroup.add(hatch);
-
-  // conning tower, set back from the bow like a real hull
-  const tower = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.0, 1.6), rustDark);
-  tower.position.set(0, HULL_R + 0.45, -0.6);
-  subGroup.add(tower);
-
-  const periscope = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.05, 0.05, 1.1, 8),
-    brass,
+  // main hull: capsule from cylinder + stretched sphere caps
+  const bodyLen = 4.2;
+  const R = 0.85;
+  const body = addShadow(
+    new THREE.Mesh(new THREE.CylinderGeometry(R, R, bodyLen, 28, 1, true), hullMat),
   );
-  periscope.position.set(0.2, HULL_R + 1.05, -0.9);
-  subGroup.add(periscope);
+  body.rotation.z = Math.PI / 2;
+  hullGroup.add(body);
+  const nose = addShadow(new THREE.Mesh(new THREE.SphereGeometry(R, 28, 20), hullMat));
+  nose.position.x = bodyLen / 2;
+  nose.scale.x = 1.5;
+  hullGroup.add(nose);
+  const tail = addShadow(new THREE.Mesh(new THREE.SphereGeometry(R, 28, 20), hullMat));
+  tail.position.x = -bodyLen / 2;
+  tail.scale.x = 1.9;
+  hullGroup.add(tail);
 
-  // tail fins (rudder + planes) so "which way is aft" is unambiguous at a
-  // glance, and a propeller nub to sell it as a machine
-  const finGeo = new THREE.BoxGeometry(0.08, 0.9, 0.7);
-  const finTop = new THREE.Mesh(finGeo, rustDark);
-  finTop.position.set(0, HULL_R * 0.55, -HULL_LEN / 2 - 0.2);
-  subGroup.add(finTop);
-  for (const side of [-1, 1]) {
-    const fin = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.08, 0.6), rustDark);
-    fin.position.set(side * HULL_R * 0.9, -HULL_R * 0.2, -HULL_LEN / 2 - 0.1);
-    subGroup.add(fin);
+  // sail / conning tower
+  const sail = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.44, 0.9, 18), panelMat));
+  sail.scale.z = 2.1;
+  sail.position.set(0.5, 1.05, 0);
+  hullGroup.add(sail);
+  const mast = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.5, 8), trimMat));
+  mast.position.set(0.6, 1.7, 0);
+  hullGroup.add(mast);
+  navLight = new THREE.Mesh(
+    new THREE.SphereGeometry(0.05, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0x38e0a0 }),
+  );
+  navLight.position.set(0.6, 1.98, 0);
+  hullGroup.add(navLight);
+
+  // dive planes + tail fins
+  function fin(w: number, h: number, t: number): THREE.Mesh {
+    return addShadow(new THREE.Mesh(new THREE.BoxGeometry(w, t, h), trimMat));
   }
-  const prop = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.5, 8), brass);
-  prop.rotation.x = -Math.PI / 2;
-  prop.position.set(0, 0, -HULL_LEN / 2 - HULL_R - 0.15);
-  subGroup.add(prop);
+  const fp = fin(0.8, 2.6, 0.08);
+  fp.position.set(1.3, 0, 0);
+  hullGroup.add(fp); // bow planes
+  const tp = fin(0.9, 3.0, 0.09);
+  tp.position.set(-2.4, 0, 0);
+  hullGroup.add(tp); // stern planes
+  const tv = addShadow(new THREE.Mesh(new THREE.BoxGeometry(0.9, 2.4, 0.09), trimMat));
+  tv.position.set(-2.4, 0, 0);
+  hullGroup.add(tv); // rudder
 
-  // side ballast pods, riveted-industrial detail
-  for (const side of [-1, 1]) {
-    const pod = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.22, 2.6, 4, 8),
-      rustDark,
+  // shrouded thruster
+  const shroud = addShadow(new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.09, 10, 24), trimMat));
+  shroud.rotation.y = Math.PI / 2;
+  shroud.position.x = -3.15;
+  hullGroup.add(shroud);
+  propGroup = new THREE.Group();
+  propGroup.position.x = -3.15;
+  for (let i = 0; i < 4; i++) {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.42, 0.12), panelMat);
+    b.position.y = 0.22;
+    const holder = new THREE.Group();
+    holder.add(b);
+    holder.rotation.x = (i * Math.PI) / 2;
+    propGroup.add(holder);
+  }
+  hullGroup.add(propGroup);
+}
+
+// floodlights + visible beams (r170: spot intensity is candela now)
+const beams: THREE.Mesh[] = [];
+function floodlight(y: number, z: number): void {
+  const housing = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.14, 0.2, 12), trimMat));
+  housing.rotation.z = Math.PI / 2 - 0.35;
+  housing.position.set(2.6, y, z);
+  hullGroup.add(housing);
+  const lamp = new THREE.SpotLight(0xbfe9e2, 220, 26, 0.5, 0.55, 1.4);
+  lamp.position.set(2.7, y, z);
+  lamp.castShadow = true;
+  lamp.shadow.mapSize.set(512, 512);
+  const tgt = new THREE.Object3D();
+  tgt.position.set(9, y - 4.5, z * 2);
+  hullGroup.add(tgt);
+  lamp.target = tgt;
+  hullGroup.add(lamp);
+  const cone = new THREE.Mesh(
+    new THREE.ConeGeometry(1.7, 9, 24, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: 0x9fd8cf,
+      transparent: true,
+      opacity: 0.028, // reference used .045 pre-bloom; our post stack amplifies
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  cone.position.copy(lamp.position);
+  const dir = new THREE.Vector3().subVectors(tgt.position, lamp.position).normalize();
+  cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), dir.clone().negate());
+  cone.translateY(-4.5);
+  hullGroup.add(cone);
+  beams.push(cone);
+}
+floodlight(0.35, 0.45);
+floodlight(0.35, -0.45);
+
+// arm mount under the bow
+const mount = new THREE.Object3D();
+mount.position.set(1.9, -0.75, 0);
+hullGroup.add(mount);
+const shoulderBall = addShadow(new THREE.Mesh(new THREE.SphereGeometry(0.22, 14, 14), trimMat));
+shoulderBall.position.copy(mount.position);
+hullGroup.add(shoulderBall);
+
+// --------------------------------------------------------------- seafloor ---
+const floorY = -6.5;
+{
+  const g = new THREE.PlaneGeometry(300, 300, 160, 160);
+  const pos = g.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    pos.setZ(
+      i,
+      Math.sin(x * 0.22) * Math.cos(y * 0.18) * 0.9 +
+        Math.sin(x * 0.05 + y * 0.07) * 1.6 +
+        Math.sin(x * 1.3) * Math.sin(y * 1.1) * 0.12,
     );
-    pod.rotation.x = Math.PI / 2;
-    pod.position.set(side * (HULL_R + 0.25), -HULL_R * 0.5, -0.4);
-    subGroup.add(pod);
+  }
+  g.computeVertexNormals();
+  const floor = new THREE.Mesh(
+    g,
+    new THREE.MeshStandardMaterial({ color: 0x0a1a22, roughness: 1, metalness: 0 }),
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = floorY;
+  floor.receiveShadow = true;
+  scene.add(floor);
+}
+// rocks
+{
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x0c1d26, roughness: 1 });
+  for (let i = 0; i < 26; i++) {
+    const r = addShadow(
+      new THREE.Mesh(new THREE.DodecahedronGeometry(0.4 + Math.random() * 1.6, 0), rockMat),
+    );
+    const a = Math.random() * Math.PI * 2;
+    const d = 6 + Math.random() * 45;
+    r.position.set(Math.cos(a) * d, floorY + 0.3 + Math.random() * 0.4, Math.sin(a) * d);
+    r.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+    r.scale.y = 0.5 + Math.random() * 0.5;
+    scene.add(r);
   }
 }
 
-// headlight mounted at the nose, aimed ahead (targets updated per-frame)
-headlight.position.set(0, 0.15, NOSE_Z - 0.3);
-
-// ------------------------------------------------------------- claw arm ---
-// Two-bone IK: a shoulder mounted under the bow reaches for a world-space
-// target. yaw+pitch at the shoulder aim the plane of the arm; a single
-// elbow bend (law of cosines) hits the target distance within that plane.
-const SHOULDER_LOCAL = new THREE.Vector3(0, -HULL_R - 0.1, NOSE_Z - 1.4);
-const UPPER_LEN = 1.5;
-const FORE_LEN = 1.4;
-
-const shoulder = new THREE.Group();
-shoulder.position.copy(SHOULDER_LOCAL);
-subGroup.add(shoulder);
-
-const upperArm = new THREE.Group(); // pitches at the shoulder
-shoulder.add(upperArm);
-const upperMesh = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.14, 0.11, UPPER_LEN, 8),
-  rustDark,
-);
-upperMesh.rotation.x = Math.PI / 2;
-upperMesh.position.z = UPPER_LEN / 2;
-upperArm.add(upperMesh);
-
-const elbow = new THREE.Group(); // pitches relative to the upper arm
-elbow.position.z = UPPER_LEN;
-upperArm.add(elbow);
-const foreMesh = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.1, 0.08, FORE_LEN, 8),
-  rustDark,
-);
-foreMesh.rotation.x = Math.PI / 2;
-foreMesh.position.z = FORE_LEN / 2;
-elbow.add(foreMesh);
-
-const clawHead = new THREE.Group();
-clawHead.position.z = FORE_LEN;
-elbow.add(clawHead);
-const fingerGeo = new THREE.ConeGeometry(0.07, 0.55, 6);
-const fingerL = new THREE.Mesh(fingerGeo, brass);
-const fingerR = new THREE.Mesh(fingerGeo, brass);
-for (const [f, side] of [[fingerL, -1], [fingerR, 1]] as const) {
-  f.rotation.x = Math.PI / 2;
-  f.position.set(side * 0.08, 0, 0.28);
-  clawHead.add(f);
-}
-
-/** Solve a 2-bone yaw/pitch+elbow IK in `shoulder`'s local space, aiming at
- *  `targetLocal`. Rest pose (all angles 0) points the arm along local +Z. */
-function solveArm(targetLocal: THREE.Vector3): void {
-  const horiz = Math.hypot(targetLocal.x, targetLocal.z);
-  const yaw = Math.atan2(targetLocal.x, targetLocal.z);
-  const reach = THREE.MathUtils.clamp(
-    Math.hypot(horiz, targetLocal.y),
-    Math.abs(UPPER_LEN - FORE_LEN) + 0.05,
-    UPPER_LEN + FORE_LEN - 0.05,
-  );
-  const elevation = Math.atan2(targetLocal.y, horiz);
-  const shoulderOffset = Math.acos(
-    THREE.MathUtils.clamp(
-      (UPPER_LEN ** 2 + reach ** 2 - FORE_LEN ** 2) / (2 * UPPER_LEN * reach),
-      -1,
-      1,
+// salvage crate with beacon
+const crate = new THREE.Group();
+let beacon: THREE.Mesh;
+let beaconLight: THREE.PointLight;
+{
+  const box = addShadow(
+    new THREE.Mesh(
+      new THREE.BoxGeometry(1.4, 0.9, 1.0),
+      new THREE.MeshStandardMaterial({ color: 0x223226, roughness: 0.9, metalness: 0.2 }),
     ),
   );
-  const elbowInterior = Math.acos(
-    THREE.MathUtils.clamp(
-      (UPPER_LEN ** 2 + FORE_LEN ** 2 - reach ** 2) / (2 * UPPER_LEN * FORE_LEN),
-      -1,
-      1,
-    ),
+  crate.add(box);
+  beacon = new THREE.Mesh(
+    new THREE.SphereGeometry(0.07, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0xe0a458 }),
   );
-  shoulder.rotation.y = yaw;
-  upperArm.rotation.x = -(elevation + shoulderOffset);
-  elbow.rotation.x = Math.PI - elbowInterior;
+  beacon.position.set(0.5, 0.52, 0.3);
+  crate.add(beacon);
+  beaconLight = new THREE.PointLight(0xe0a458, 0, 5, 1.8);
+  beaconLight.position.copy(beacon.position);
+  crate.add(beaconLight);
+  crate.position.set(2.6, floorY + 1.15, 2.2);
+  crate.rotation.y = 0.5;
+  scene.add(crate);
 }
-function setClaw(open: number): void {
-  // 0 = closed, 1 = open
-  fingerL.rotation.z = open * 0.5;
-  fingerR.rotation.z = -open * 0.5;
-}
-setClaw(1);
 
-// volumetric beam cone off the nose
-const beamMat = new THREE.ShaderMaterial({
-  transparent: true,
-  blending: THREE.AdditiveBlending,
-  depthWrite: false,
-  side: THREE.BackSide, // render the far inside wall — softer silhouette
-  uniforms: { time: { value: 0 } },
-  vertexShader: /* glsl */ `
-    varying float vAlong; // 0 at apex (nose) -> 1 at far end
-    varying vec3 vNormal;
-    varying vec3 vView;
-    void main() {
-      vAlong = 1.0 - uv.y;
-      vNormal = normalMatrix * normal;
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      vView = -mv.xyz;
-      gl_Position = projectionMatrix * mv;
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    varying float vAlong;
-    varying vec3 vNormal;
-    varying vec3 vView;
-    uniform float time;
-    void main() {
-      // soft radial edge: fade out where the view grazes the cone's rim
-      float facing = abs(dot(normalize(vNormal), normalize(vView)));
-      float body = smoothstep(0.0, 0.65, facing);
-      float fall = pow(1.0 - vAlong, 2.0);
-      float shimmer = 0.92 + 0.08 * sin(time * 6.0 + vAlong * 14.0);
-      float a = body * fall * 0.14 * shimmer;
-      gl_FragColor = vec4(vec3(0.62, 0.82, 0.95) * a, a);
-    }
-  `,
-});
-const beamGeo = new THREE.ConeGeometry(4.2, 22, 24, 1, true);
-const beam = new THREE.Mesh(beamGeo, beamMat);
-// unambiguous orientation: cone's apex axis (+Y) mapped onto -Z, so the apex
-// sits at the nose and the cone opens along +Z (our forward)
-beam.quaternion.setFromUnitVectors(
-  new THREE.Vector3(0, 1, 0),
-  new THREE.Vector3(0, 0, -1),
-);
-beam.position.set(0, 0.15, NOSE_Z - 0.4 + 11);
-subGroup.add(beam);
-
-// anchor the beam to a visible light source: a hot lamp glow at the nose
-function softDiscTexture(): THREE.CanvasTexture {
-  const c = document.createElement("canvas");
-  c.width = c.height = 128;
-  const g = c.getContext("2d")!;
-  const grad = g.createRadialGradient(64, 64, 2, 64, 64, 64);
-  grad.addColorStop(0, "rgba(255,255,255,1)");
-  grad.addColorStop(0.3, "rgba(255,255,255,0.5)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  g.fillStyle = grad;
-  g.fillRect(0, 0, 128, 128);
-  return new THREE.CanvasTexture(c);
-}
-const lampGlow = new THREE.Sprite(
-  new THREE.SpriteMaterial({
-    map: softDiscTexture(),
-    color: 0xd9edff,
-    transparent: true,
-    opacity: 0.9,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-  }),
-);
-lampGlow.scale.setScalar(0.8);
-(lampGlow.material as THREE.SpriteMaterial).opacity = 0.55;
-lampGlow.position.set(0, 0.15, NOSE_Z + 0.35);
-subGroup.add(lampGlow);
-// and a small real light so the bow itself catches the lamp
-const noseLight = new THREE.PointLight(0xd9edff, 7, 7, 1.8);
-noseLight.position.set(0, 0.15, NOSE_Z - 0.65);
-subGroup.add(noseLight);
-
-// ------------------------------------------------------------- the wreck ---
-// A second, unrelated hull (the old prototype's Sea Major .glb) dead on the
-// seafloor as the salvage target — fine to use as-is here, since dressing
-// doesn't depend on knowing its exact forward axis the way the player sub did.
-const loader = new GLTFLoader();
-loader.load("assets/models/sea_major.glb", (gltf) => {
+// distant wreck silhouette (Sea Major glb, half-buried set dressing)
+new GLTFLoader().load("assets/models/sea_major.glb", (gltf) => {
   const wreck = gltf.scene;
   const box = new THREE.Box3().setFromObject(wreck);
   const size = box.getSize(new THREE.Vector3());
   if (size.x > size.z) wreck.rotation.y = Math.PI / 2;
-  const long = Math.max(size.x, size.z);
-  wreck.scale.setScalar(26 / long); // the wreck is a big ship
-  wreck.position.set(10, -22.5, 55);
-  wreck.rotation.z = 0.34; // keeled over
+  wreck.scale.setScalar(26 / Math.max(size.x, size.z));
+  wreck.position.set(26, floorY - 1.5, 42);
+  wreck.rotation.z = 0.34;
   wreck.rotation.y = 2.3;
   scene.add(wreck);
 });
 
-// --------------------------------------------------------------- seafloor ---
-function noise2(x: number, z: number): number {
-  return (
-    Math.sin(x * 0.11 + z * 0.07) * 1.2 +
-    Math.sin(x * 0.043 - z * 0.091 + 1.7) * 2.2 +
-    Math.sin(x * 0.021 + z * 0.033 + 4.2) * 3.5
-  );
-}
+// -------------------------------------- enemy patrol drone (60s sentinel) ---
+const drone = new THREE.Group();
+scene.add(drone);
+const droneHullMat = new THREE.MeshStandardMaterial({ color: 0x2b2f27, roughness: 0.72, metalness: 0.5 });
+const droneDarkMat = new THREE.MeshStandardMaterial({ color: 0x15181b, roughness: 0.55, metalness: 0.6 });
+let droneChassis: THREE.Group;
+let droneHead: THREE.Group;
+let droneEye: THREE.Mesh;
+let droneEyeLight: THREE.PointLight;
+let scanCone: THREE.Mesh;
+let scanLight: THREE.SpotLight;
+let antTip: THREE.Mesh;
+const tentacles: { arm: THREE.Group; elbow: THREE.Group; s: number }[] = [];
 {
-  const geo = new THREE.PlaneGeometry(600, 600, 140, 140);
-  geo.rotateX(-Math.PI / 2);
-  const pos = geo.attributes.position as THREE.BufferAttribute;
-  for (let i = 0; i < pos.count; i++) {
-    pos.setY(i, noise2(pos.getX(i), pos.getZ(i)));
+  droneChassis = new THREE.Group();
+  drone.add(droneChassis);
+  const body = addShadow(new THREE.Mesh(new THREE.SphereGeometry(0.55, 20, 16), droneHullMat));
+  body.scale.y = 1.12;
+  droneChassis.add(body);
+  for (const [y, r] of [
+    [0, 0.565],
+    [0.3, 0.47],
+    [-0.3, 0.47],
+  ] as const) {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(r, 0.022, 8, 30), droneDarkMat);
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = y;
+    droneChassis.add(ring);
   }
-  geo.computeVertexNormals();
-  const floor = new THREE.Mesh(
-    geo,
-    new THREE.MeshStandardMaterial({ color: 0x18242c, roughness: 1 }),
+  for (let i = 0; i < 14; i++) {
+    const stud = new THREE.Mesh(new THREE.SphereGeometry(0.028, 6, 6), droneDarkMat);
+    const a = (i / 14) * Math.PI * 2;
+    stud.position.set(Math.cos(a) * 0.575, 0.15, Math.sin(a) * 0.575);
+    droneChassis.add(stud);
+  }
+  for (const s of [-1, 1]) {
+    const pod = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.14, 0.42, 10), droneDarkMat));
+    pod.rotation.x = Math.PI / 2;
+    pod.position.set(s * 0.62, 0, -0.05);
+    droneChassis.add(pod);
+  }
+  const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.02, 0.7, 6), droneDarkMat);
+  ant.position.y = 0.95;
+  droneChassis.add(ant);
+  antTip = new THREE.Mesh(
+    new THREE.SphereGeometry(0.04, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0xff2418 }),
   );
-  floor.position.y = -26;
-  scene.add(floor);
+  antTip.position.y = 1.32;
+  droneChassis.add(antTip);
+
+  droneHead = new THREE.Group();
+  droneHead.position.y = 0.12;
+  droneChassis.add(droneHead);
+  const socket = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.24, 0.26, 14), droneDarkMat));
+  socket.rotation.x = Math.PI / 2;
+  socket.position.z = 0.5;
+  droneHead.add(socket);
+  const bezel = new THREE.Mesh(new THREE.TorusGeometry(0.155, 0.025, 8, 20), droneHullMat);
+  bezel.position.z = 0.63;
+  droneHead.add(bezel);
+  droneEye = new THREE.Mesh(
+    new THREE.SphereGeometry(0.13, 14, 14),
+    new THREE.MeshBasicMaterial({ color: 0xff2418 }),
+  );
+  droneEye.position.z = 0.64;
+  droneHead.add(droneEye);
+  droneEyeLight = new THREE.PointLight(0xff2418, 10, 7, 1.8);
+  droneEyeLight.position.z = 0.72;
+  droneHead.add(droneEyeLight);
+  scanCone = new THREE.Mesh(
+    new THREE.ConeGeometry(1.5, 8, 20, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: 0xff3020,
+      transparent: true,
+      opacity: 0.05,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  scanCone.rotation.x = -Math.PI / 2;
+  scanCone.position.z = 4.6;
+  droneHead.add(scanCone);
+  scanLight = new THREE.SpotLight(0xff2418, 60, 22, 0.32, 0.6, 1.6);
+  scanLight.position.z = 0.6;
+  const scanTgt = new THREE.Object3D();
+  scanTgt.position.z = 9;
+  droneHead.add(scanTgt);
+  scanLight.target = scanTgt;
+  droneHead.add(scanLight);
+
+  for (const s of [-1, 1]) {
+    const arm = new THREE.Group();
+    arm.position.set(s * 0.3, -0.55, 0);
+    const seg1 = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.024, 0.5, 6), droneDarkMat);
+    seg1.position.y = -0.25;
+    arm.add(seg1);
+    const elbow = new THREE.Group();
+    elbow.position.y = -0.5;
+    arm.add(elbow);
+    const seg2 = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.012, 0.4, 6), droneDarkMat);
+    seg2.position.y = -0.2;
+    elbow.add(seg2);
+    droneChassis.add(arm);
+    tentacles.push({ arm, elbow, s });
+  }
+  drone.position.set(crate.position.x + 4.6, floorY + 3.3, crate.position.z);
 }
 
-// ------------------------------------------------------------ particulate ---
-// Motes live in a cube around the sub and wrap as it moves — this is what
-// sells speed and direction in open water.
-const MOTES = 1400;
-const RANGE = 46;
+// -------------------------------------------------------- IK arm (FABRIK) ---
+const LENGTHS = [1.35, 1.15, 0.85];
+const N = LENGTHS.length;
+const TOTAL = LENGTHS.reduce((a, b) => a + b, 0);
+const joints: THREE.Vector3[] = [];
+for (let i = 0; i <= N; i++) joints.push(new THREE.Vector3(0, -i, 0));
+
+const armMat = new THREE.MeshStandardMaterial({ color: 0x101315, roughness: 0.9, metalness: 0.2 });
+const jointMat = new THREE.MeshStandardMaterial({ color: 0x1c2124, roughness: 0.8, metalness: 0.3 });
+const segMeshes: THREE.Mesh[] = [];
+const jointMeshes: THREE.Mesh[] = [];
+for (let i = 0; i < N; i++) {
+  const r = 0.1 - i * 0.02;
+  const geo = new THREE.CylinderGeometry(r * 0.8, r, LENGTHS[i], 12);
+  geo.rotateX(Math.PI / 2); // axis along +Z so lookAt works
+  const m = addShadow(new THREE.Mesh(geo, armMat));
+  segMeshes.push(m);
+  scene.add(m);
+}
+for (let i = 0; i <= N; i++) {
+  const j = addShadow(new THREE.Mesh(new THREE.SphereGeometry(0.11 - i * 0.015, 12, 12), jointMat));
+  jointMeshes.push(j);
+  scene.add(j);
+}
+// hydraulic-look thin rods
+const rodMat = new THREE.MeshStandardMaterial({ color: 0x23292d, roughness: 0.6, metalness: 0.5 });
+const rods: THREE.Mesh[] = [];
+for (let i = 0; i < N; i++) {
+  const g = new THREE.CylinderGeometry(0.02, 0.02, 1, 6);
+  g.rotateX(Math.PI / 2);
+  const rod = new THREE.Mesh(g, rodMat);
+  scene.add(rod);
+  rods.push(rod);
+}
+
+// claw: three fingers
+const claw = new THREE.Group();
+scene.add(claw);
+const wrist = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.11, 0.16, 10), jointMat));
+wrist.rotation.x = Math.PI / 2;
+claw.add(wrist);
+const fingers: THREE.Mesh[] = [];
+for (let i = 0; i < 3; i++) {
+  const pivot = new THREE.Group();
+  pivot.rotation.z = i * ((Math.PI * 2) / 3);
+  const f1 = addShadow(new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.06, 0.3), armMat));
+  f1.position.set(0, 0.1, 0.2);
+  f1.rotation.x = -0.5;
+  const tip = addShadow(new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.05, 0.2), trimMat));
+  tip.position.set(0, 0.02, 0.14);
+  tip.rotation.x = 0.8;
+  f1.add(tip);
+  pivot.add(f1);
+  claw.add(pivot);
+  fingers.push(f1);
+}
+let clawClosed = false;
+let clawT = 0;
+
+// target reticle
+const reticle = new THREE.Group();
+{
+  const m = new THREE.MeshBasicMaterial({
+    color: 0x8fd6c8,
+    transparent: true,
+    opacity: 0.8,
+    side: THREE.DoubleSide,
+  });
+  reticle.add(new THREE.Mesh(new THREE.RingGeometry(0.14, 0.17, 32), m));
+  reticle.add(new THREE.Mesh(new THREE.CircleGeometry(0.02, 10), m.clone()));
+  scene.add(reticle);
+}
+const armTarget = new THREE.Vector3(2.2, -1.4, 1.2);
+const smoothedTarget = armTarget.clone();
+
+function solveIK(base: THREE.Vector3): void {
+  const t = smoothedTarget.clone();
+  const d = t.distanceTo(base);
+  if (d > TOTAL * 0.995) {
+    t.copy(base).addScaledVector(t.sub(base).normalize(), TOTAL * 0.995);
+  }
+  for (let it = 0; it < 10; it++) {
+    joints[N].copy(t);
+    for (let i = N - 1; i >= 0; i--) {
+      const dir = joints[i].clone().sub(joints[i + 1]).normalize();
+      joints[i].copy(joints[i + 1]).addScaledVector(dir, LENGTHS[i]);
+    }
+    joints[0].copy(base);
+    for (let i = 1; i <= N; i++) {
+      const dir = joints[i].clone().sub(joints[i - 1]).normalize();
+      joints[i].copy(joints[i - 1]).addScaledVector(dir, LENGTHS[i - 1]);
+    }
+    if (joints[N].distanceTo(t) < 0.002) break;
+  }
+}
+
+// ------------------------------------------------------------ marine snow ---
+const MOTES = 1600;
+const RANGE = 34;
 const motePos = new Float32Array(MOTES * 3);
 for (let i = 0; i < MOTES * 3; i++) motePos[i] = THREE.MathUtils.randFloatSpread(RANGE * 2);
 const moteGeo = new THREE.BufferGeometry();
 moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
-function softDot(): THREE.CanvasTexture {
-  const c = document.createElement("canvas");
-  c.width = c.height = 64;
-  const g = c.getContext("2d")!;
-  const grad = g.createRadialGradient(32, 32, 2, 32, 32, 32);
-  grad.addColorStop(0, "rgba(255,255,255,1)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  g.fillStyle = grad;
-  g.fillRect(0, 0, 64, 64);
-  return new THREE.CanvasTexture(c);
-}
 const motes = new THREE.Points(
   moteGeo,
   new THREE.PointsMaterial({
-    color: 0x93b7c0,
-    size: 0.14,
-    map: softDot(),
+    color: 0x7fa8b0,
+    size: 0.05,
     transparent: true,
-    opacity: 0.55,
-    sizeAttenuation: true,
+    opacity: 0.5,
     depthWrite: false,
+    blending: THREE.AdditiveBlending,
   }),
 );
 scene.add(motes);
 
-// (No wildlife yet — empty water is scarier than placeholder fish. Creatures
-// come back later done properly: Spine billboards or simple rigged meshes.)
+// thruster bubbles
+const bubbles: THREE.Mesh[] = [];
+{
+  const bMat = new THREE.MeshBasicMaterial({ color: 0x9fd8cf, transparent: true, opacity: 0.25 });
+  for (let i = 0; i < 24; i++) {
+    const b = new THREE.Mesh(new THREE.SphereGeometry(0.03 + Math.random() * 0.04, 6, 6), bMat.clone());
+    b.userData = { life: Math.random() };
+    scene.add(b);
+    bubbles.push(b);
+  }
+}
 
 // ------------------------------------------------------------------ input ---
+type Mode = "PILOT" | "MANIPULATOR";
+let mode: Mode = "PILOT";
+
 const keys = new Set<string>();
-window.addEventListener("keydown", (e) => keys.add(e.code));
+window.addEventListener("keydown", (e) => {
+  keys.add(e.code);
+  if (e.code === "Tab") {
+    e.preventDefault();
+    toggleMode();
+  }
+  if (e.code === "Space" && mode === "MANIPULATOR") {
+    e.preventDefault();
+    toggleClaw();
+  }
+});
 window.addEventListener("keyup", (e) => keys.delete(e.code));
 
-const params = new URLSearchParams(location.search);
 let orbitYaw = parseFloat(params.get("yaw") ?? "0");
 let orbitPitch = parseFloat(params.get("pitch") ?? "0.12");
-const camDist = parseFloat(params.get("dist") ?? "14");
+let camDist = parseFloat(params.get("dist") ?? "12");
 let dragging = false;
-window.addEventListener("mousedown", () => (dragging = true));
-window.addEventListener("mouseup", () => (dragging = false));
-window.addEventListener("mousemove", (e) => {
-  if (!dragging) return;
-  orbitYaw -= e.movementX * 0.004;
-  orbitPitch = THREE.MathUtils.clamp(orbitPitch + e.movementY * 0.003, -0.5, 0.9);
+let dragMoved = 0;
+const mouse = new THREE.Vector2(0, 0);
+const raycaster = new THREE.Raycaster();
+const targetPlane = new THREE.Plane();
+
+renderer.domElement.addEventListener("pointerdown", () => {
+  dragging = true;
+  dragMoved = 0;
 });
+window.addEventListener("pointerup", () => {
+  if (dragging && dragMoved < 6 && mode === "MANIPULATOR") toggleClaw();
+  dragging = false;
+});
+window.addEventListener("pointermove", (e) => {
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  if (dragging) {
+    dragMoved += Math.abs(e.movementX) + Math.abs(e.movementY);
+    orbitYaw -= e.movementX * 0.004;
+    orbitPitch = THREE.MathUtils.clamp(orbitPitch + e.movementY * 0.003, -0.5, 0.9);
+  }
+});
+window.addEventListener(
+  "wheel",
+  (e) => {
+    camDist = THREE.MathUtils.clamp(camDist + e.deltaY * 0.01, 5, 28);
+  },
+  { passive: true },
+);
+
+// --- gamepad: standard mapping. Y toggles mode, A grips, sticks fly/guide ---
+const DEADZONE = 0.16;
+const prevButtons: boolean[] = [];
+function dz(v: number): number {
+  return Math.abs(v) < DEADZONE ? 0 : v;
+}
+type PadState = {
+  lx: number; ly: number; rx: number; ry: number;
+  lt: number; rt: number;
+  pressed: (i: number) => boolean; // edge-triggered
+};
+function readPad(): PadState | null {
+  const gp = navigator.getGamepads?.()?.[0];
+  if (!gp) return null;
+  const edges: boolean[] = gp.buttons.map((b, i) => b.pressed && !prevButtons[i]);
+  gp.buttons.forEach((b, i) => (prevButtons[i] = b.pressed));
+  return {
+    lx: dz(gp.axes[0] ?? 0),
+    ly: dz(gp.axes[1] ?? 0),
+    rx: dz(gp.axes[2] ?? 0),
+    ry: dz(gp.axes[3] ?? 0),
+    lt: gp.buttons[6]?.value ?? 0,
+    rt: gp.buttons[7]?.value ?? 0,
+    pressed: (i) => edges[i] ?? false,
+  };
+}
+
+// ------------------------------------------------------------------- HUD ---
+const modeEl = document.getElementById("mode")!;
+const clawHud = document.getElementById("clawState")!;
+const depthEl = document.getElementById("depth")!;
+const headEl = document.getElementById("heading")!;
+const contactEl = document.getElementById("contact")!;
+const hintPilot = document.getElementById("hintPilot")!;
+const hintManip = document.getElementById("hintManip")!;
+
+function toggleMode(): void {
+  mode = mode === "PILOT" ? "MANIPULATOR" : "PILOT";
+  modeEl.textContent = mode;
+  hintPilot.style.display = mode === "PILOT" ? "" : "none";
+  hintManip.style.display = mode === "MANIPULATOR" ? "" : "none";
+}
+function toggleClaw(): void {
+  clawClosed = !clawClosed;
+  clawHud.textContent = clawClosed ? "CLAW CLOSED" : "CLAW OPEN";
+  clawHud.classList.toggle("closed", clawClosed);
+}
 
 // ---------------------------------------------------------------- physics ---
 const sub = {
-  pos: new THREE.Vector3(0, -6, 0),
+  pos: new THREE.Vector3(-1.2, 0.4, 0),
   vel: new THREE.Vector3(),
   yaw: 0,
   yawVel: 0,
@@ -425,12 +626,7 @@ const DRAG = 0.55;
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 composer.addPass(
-  new UnrealBloomPass(
-    new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.5,
-    0.6,
-    0.8,
-  ),
+  new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.45, 0.6, 0.8),
 );
 composer.addPass(
   new ShaderPass({
@@ -461,85 +657,192 @@ composer.addPass(
 // ------------------------------------------------------------------- loop ---
 const clock = new THREE.Clock();
 const forward = new THREE.Vector3();
+const baseWorld = new THREE.Vector3();
+const camWorldDir = new THREE.Vector3();
+const camRight = new THREE.Vector3();
+const camUp = new THREE.Vector3();
+const lookTmp = new THREE.Vector3();
 
-function animate() {
+function animate(): void {
   requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const dt = Math.min(clock.getDelta() || 0.016, 0.05);
   const t = clock.elapsedTime;
 
-  // --- steer ---
+  const pad = readPad();
+  if (pad) {
+    if (pad.pressed(3)) toggleMode(); // Y
+    if (pad.pressed(0) && mode === "MANIPULATOR") toggleClaw(); // A
+    orbitYaw -= pad.rx * 2.2 * dt;
+    orbitPitch = THREE.MathUtils.clamp(orbitPitch + pad.ry * 1.5 * dt, -0.5, 0.9);
+  }
+
+  // --- steer (PILOT mode only; MANIPULATOR coasts on drag) ---
   let turn = 0;
-  if (keys.has("KeyA")) turn += 1;
-  if (keys.has("KeyD")) turn -= 1;
+  let thrust = 0;
+  let vert = 0;
+  if (mode === "PILOT") {
+    if (keys.has("KeyA")) turn += 1;
+    if (keys.has("KeyD")) turn -= 1;
+    if (keys.has("KeyW")) thrust += 1;
+    if (keys.has("KeyS")) thrust -= 0.5;
+    if (keys.has("KeyR")) vert += 1;
+    if (keys.has("KeyF")) vert -= 1;
+    if (pad) {
+      turn -= pad.lx;
+      thrust -= pad.ly; // stick forward = negative axis
+      vert += pad.rt - pad.lt;
+    }
+  }
   sub.yawVel += turn * TURN * dt;
   sub.yawVel *= Math.exp(-2.2 * dt);
   sub.yaw += sub.yawVel * dt * 60 * 0.02;
 
   forward.set(Math.sin(sub.yaw), 0, Math.cos(sub.yaw));
-  let thrust = 0;
-  if (keys.has("KeyW")) thrust += 1;
-  if (keys.has("KeyS")) thrust -= 0.5;
   sub.vel.addScaledVector(forward, thrust * THRUST * dt);
-  if (keys.has("KeyR")) sub.vel.y += VTHRUST * dt;
-  if (keys.has("KeyF")) sub.vel.y -= VTHRUST * dt;
+  sub.vel.y += vert * VTHRUST * dt;
   sub.vel.multiplyScalar(Math.exp(-DRAG * dt));
   sub.pos.addScaledVector(sub.vel, dt);
-  sub.pos.y = Math.min(sub.pos.y, 8); // don't fly out of the sea
-  sub.pos.y = Math.max(sub.pos.y, -24 + 3); // don't dig into the floor
+  sub.pos.y = Math.min(sub.pos.y, 8);
+  sub.pos.y = Math.max(sub.pos.y, floorY + 2.2);
 
-  // --- pose the sub: heading, gentle roll into turns, pitch with climb ---
+  // --- pose the sub ---
   subGroup.position.copy(sub.pos);
+  subGroup.position.y += Math.sin(t * 0.6) * 0.1; // idle bob
   subGroup.rotation.y = sub.yaw;
   subGroup.rotation.z = THREE.MathUtils.lerp(
     subGroup.rotation.z,
-    -sub.yawVel * 0.5,
+    -sub.yawVel * 0.5 + Math.sin(t * 0.4) * 0.02,
     1 - Math.exp(-4 * dt),
   );
   subGroup.rotation.x = THREE.MathUtils.lerp(
     subGroup.rotation.x,
-    THREE.MathUtils.clamp(-sub.vel.y * 0.03, -0.2, 0.2),
+    THREE.MathUtils.clamp(-sub.vel.y * 0.03, -0.2, 0.2) + Math.sin(t * 0.53 + 1) * 0.012,
     1 - Math.exp(-4 * dt),
   );
-  // idle bob when nearly still
-  subGroup.position.y += Math.sin(t * 0.8) * 0.08;
+  propGroup.rotation.x = t * (4 + sub.vel.length() * 2);
+  (navLight.material as THREE.MeshBasicMaterial).color.setHex(
+    t % 1.4 < 0.15 ? 0x9dffd4 : 0x123c2c,
+  );
 
-  // headlight aims where the nose points
-  headlightTarget.position
-    .copy(sub.pos)
-    .addScaledVector(forward, 30);
-  beamMat.uniforms.time.value = t;
+  // --- beacon blink ---
+  const blink = t % 1.1 < 0.12;
+  (beacon.material as THREE.MeshBasicMaterial).color.setHex(blink ? 0xffc878 : 0x4a361f);
+  beaconLight.intensity = blink ? 10 : 0;
 
-  // --- camera: soft third-person follow with mouse orbit ---
+  // --- patrol drone: uneven searching orbit around the crate ---
+  const orbR = 4.6;
+  const dAng = t * 0.26 + Math.sin(t * 0.11) * 1.4;
+  drone.position.set(
+    crate.position.x + Math.cos(dAng) * orbR,
+    floorY + 3.3 + Math.sin(t * 0.5) * 0.35,
+    crate.position.z + Math.sin(dAng) * orbR * 0.72,
+  );
+  lookTmp.set(
+    crate.position.x + Math.cos(dAng + 0.14) * orbR,
+    drone.position.y,
+    crate.position.z + Math.sin(dAng + 0.14) * orbR * 0.72,
+  );
+  drone.lookAt(lookTmp);
+  droneChassis.rotation.z = Math.sin(t * 0.35) * 0.06;
+  droneHead.rotation.y = Math.sin(t * 0.8) * 0.9;
+  droneHead.rotation.x = 0.5 + Math.sin(t * 0.47) * 0.18;
+
+  const range = drone.position.distanceTo(sub.pos);
+  const alert = range < 7.5;
+  const pulse = alert ? 0.8 + Math.abs(Math.sin(t * 10)) * 0.9 : 0.8 + Math.sin(t * 2.2) * 0.3;
+  droneEyeLight.intensity = pulse * 12;
+  (droneEye.material as THREE.MeshBasicMaterial).color.setHex(alert ? 0xff5a3c : 0xff2418);
+  (scanCone.material as THREE.MeshBasicMaterial).opacity =
+    0.045 + (alert ? 0.03 : 0) + Math.sin(t * 9) * 0.006;
+  scanLight.intensity = pulse * 60;
+  (antTip.material as THREE.MeshBasicMaterial).color.setHex(t % 1.0 < 0.1 ? 0xff8a70 : 0x521410);
+  for (const tn of tentacles) {
+    tn.arm.rotation.x = Math.sin(t * 1.1 + tn.s) * 0.14;
+    tn.arm.rotation.z = tn.s * 0.12 + Math.sin(t * 0.8 + tn.s * 2) * 0.1;
+    tn.elbow.rotation.x = Math.sin(t * 1.4 + tn.s) * 0.22;
+  }
+  contactEl.textContent = alert ? "PATROL DRONE" : range < 14 ? "SIGNAL FAINT" : "NONE";
+  contactEl.classList.toggle("alert", alert);
+
+  // --- camera: soft third-person follow with orbit ---
   const camYaw = sub.yaw + orbitYaw;
-  const camDir = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw));
+  const camDirV = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw));
   const desired = sub.pos
     .clone()
-    .addScaledVector(camDir, -camDist)
+    .addScaledVector(camDirV, -camDist)
     .add(new THREE.Vector3(0, camDist * 0.32 + orbitPitch * 10, 0));
   camera.position.lerp(desired, 1 - Math.exp(-3.5 * dt));
-  camera.lookAt(sub.pos.x, sub.pos.y + 1.2, sub.pos.z);
+  camera.lookAt(sub.pos.x, sub.pos.y + 0.6, sub.pos.z);
 
-  // --- claw: idle sweep, or reach-and-grab while E is held ---
-  const grabbing = keys.has("KeyE");
-  const clawTarget = grabbing
-    ? new THREE.Vector3(0.25, -1.6, UPPER_LEN + FORE_LEN - 0.5) // reach out
-    : new THREE.Vector3(
-        Math.sin(t * 0.35) * 0.25,
-        -0.85 + Math.sin(t * 0.5) * 0.15,
-        0.5 + Math.sin(t * 0.4) * 0.2,
-      ); // folded in close under the hull
-  solveArm(clawTarget);
-  setClaw(grabbing ? 0 : 1);
+  // --- arm target ---
+  if (mode === "MANIPULATOR") {
+    // mouse: camera-facing plane through a point ahead of and below the bow
+    camera.getWorldDirection(camWorldDir);
+    targetPlane.setFromNormalAndCoplanarPoint(
+      camWorldDir,
+      sub.pos.clone().addScaledVector(forward, 2.2).add(new THREE.Vector3(0, -1, 0)),
+    );
+    raycaster.setFromCamera(mouse, camera);
+    const hit = new THREE.Vector3();
+    if (raycaster.ray.intersectPlane(targetPlane, hit)) {
+      hit.y = Math.max(hit.y, floorY + 0.55);
+      armTarget.copy(hit);
+    }
+    // gamepad left stick nudges the target in the camera plane
+    if (pad && (pad.lx !== 0 || pad.ly !== 0)) {
+      camRight.setFromMatrixColumn(camera.matrix, 0);
+      camUp.setFromMatrixColumn(camera.matrix, 1);
+      armTarget.addScaledVector(camRight, pad.lx * 3.2 * dt);
+      armTarget.addScaledVector(camUp, -pad.ly * 3.2 * dt);
+      armTarget.y = Math.max(armTarget.y, floorY + 0.55);
+    }
+  } else {
+    // PILOT: arm folds in under the bow
+    mount.getWorldPosition(baseWorld);
+    armTarget
+      .copy(baseWorld)
+      .addScaledVector(forward, 0.7)
+      .add(new THREE.Vector3(0, -0.55 + Math.sin(t * 0.5) * 0.06, 0));
+  }
+  smoothedTarget.lerp(armTarget, 1 - Math.exp(-8 * dt));
 
-  // --- motes wrap around the sub ---
+  mount.getWorldPosition(baseWorld);
+  solveIK(baseWorld);
+
+  // place arm meshes
+  for (let i = 0; i < N; i++) {
+    segMeshes[i].position.copy(joints[i]).lerp(joints[i + 1], 0.5);
+    segMeshes[i].lookAt(joints[i + 1]);
+    const mid = segMeshes[i].position;
+    rods[i].position.set(mid.x, mid.y + 0.09, mid.z);
+    rods[i].lookAt(joints[i + 1].x, joints[i + 1].y + 0.05, joints[i + 1].z);
+    rods[i].scale.z = LENGTHS[i] * 0.7;
+  }
+  for (let i = 0; i <= N; i++) jointMeshes[i].position.copy(joints[i]);
+
+  // claw pose + grip animation
+  claw.position.copy(joints[N]);
+  const clawDir = joints[N].clone().sub(joints[N - 1]).normalize();
+  claw.lookAt(joints[N].clone().add(clawDir));
+  clawT += ((clawClosed ? 1 : 0) - clawT) * Math.min(1, dt * 9);
+  for (const f of fingers) f.rotation.x = -0.5 + clawT * 0.62;
+
+  // reticle (manipulator mode only)
+  reticle.visible = mode === "MANIPULATOR";
+  reticle.position.copy(smoothedTarget);
+  reticle.lookAt(camera.position);
+  reticle.children[0].rotation.z = t * 1.2;
+  const near = joints[N].distanceTo(smoothedTarget) < 0.25;
+  ((reticle.children[0] as THREE.Mesh).material as THREE.MeshBasicMaterial).color.setHex(
+    near ? 0xe0a458 : 0x8fd6c8,
+  );
+
+  // --- marine snow wraps around the sub ---
   const p = moteGeo.attributes.position as THREE.BufferAttribute;
   for (let i = 0; i < MOTES; i++) {
     let x = p.getX(i);
-    let y = p.getY(i);
+    let y = p.getY(i) - dt * 0.25;
     let z = p.getZ(i);
-    // drift
-    y += dt * 0.15;
-    // wrap into the cube centered on the sub
     if (x - sub.pos.x > RANGE) x -= RANGE * 2;
     if (x - sub.pos.x < -RANGE) x += RANGE * 2;
     if (y - sub.pos.y > RANGE) y -= RANGE * 2;
@@ -549,6 +852,37 @@ function animate() {
     p.setXYZ(i, x, y, z);
   }
   p.needsUpdate = true;
+
+  // --- thruster bubbles from the stern ---
+  for (const b of bubbles) {
+    b.userData.life += dt * 0.35;
+    if (b.userData.life > 1) {
+      b.userData.life = 0;
+      b.position
+        .copy(sub.pos)
+        .addScaledVector(forward, -3.2)
+        .add(
+          new THREE.Vector3(
+            (Math.random() - 0.5) * 0.4,
+            (Math.random() - 0.5) * 0.4,
+            (Math.random() - 0.5) * 0.4,
+          ),
+        );
+    }
+    b.position.y += dt * (0.6 + b.userData.life);
+    (b.material as THREE.MeshBasicMaterial).opacity = 0.25 * (1 - b.userData.life);
+  }
+
+  // beam shimmer
+  for (const c of beams) {
+    (c.material as THREE.MeshBasicMaterial).opacity =
+      0.026 + Math.sin(t * 7 + c.position.z) * 0.006;
+  }
+
+  // --- HUD readouts (real values from the sim now) ---
+  depthEl.textContent = (312.4 - sub.pos.y * 1.8).toFixed(1) + " M";
+  const heading = ((((-sub.yaw * 180) / Math.PI) % 360) + 360) % 360;
+  headEl.textContent = String(Math.round(heading)).padStart(3, "0") + "°";
 
   composer.render();
 }
