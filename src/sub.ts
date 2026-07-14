@@ -210,26 +210,30 @@ function softDiscTexture(): THREE.CanvasTexture {
 const discTex = softDiscTexture();
 
 function floodlight(y: number, z: number): void {
+  // The stretched nose cap reaches x≈3.38 — everything here must sit ON or
+  // ahead of that surface (at this y/z the skin is at x≈3.05), or the
+  // lights originate inside the hull and get clipped by it.
   const housing = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.14, 0.2, 12), trimMat));
   housing.rotation.z = Math.PI / 2 - 0.35;
-  housing.position.set(2.6, y, z);
+  housing.position.set(3.02, y, z);
   hullGroup.add(housing);
   const lamp = new THREE.SpotLight(0xbfe9e2, 560, 34, 0.48, 0.55, 1.4);
-  lamp.position.set(2.7, y, z);
+  lamp.position.set(3.14, y, z);
   lamp.castShadow = true;
   lamp.shadow.mapSize.set(512, 512);
   const tgt = new THREE.Object3D();
-  tgt.position.set(9, y - 4.5, z * 2);
+  tgt.position.set(9.4, y - 4.5, z * 2);
   hullGroup.add(tgt);
   lamp.target = tgt;
   hullGroup.add(lamp);
 
-  // the hot bulb itself — a small emissive core the bloom can catch
+  // the hot bulb itself — a small emissive core the bloom can catch,
+  // proud of the housing so it never intersects the nose skin
   const bulb = new THREE.Mesh(
     new THREE.SphereGeometry(0.065, 10, 10),
     new THREE.MeshBasicMaterial({ color: 0xeaffff }),
   );
-  bulb.position.set(2.72, y, z);
+  bulb.position.set(3.18, y, z);
   hullGroup.add(bulb);
 
   const cone = new THREE.Mesh(new THREE.ConeGeometry(1.7, 9, 24, 1, true), makeBeamMaterial());
@@ -602,8 +606,8 @@ clawLamp.position.set(0, -0.09, 0.05);
 // too tight to be useful.) Local orientation solved in hull space.
 const clawCam = new THREE.PerspectiveCamera(68, 300 / 170, 0.05, 60);
 {
-  const eye = new THREE.Vector3(2.75, -0.35, 0); // bow chin, above the shoulder
-  const at = new THREE.Vector3(3.8, -2.4, 0); // typical claw workspace
+  const eye = new THREE.Vector3(3.15, -0.55, 0); // proud of the bow chin skin
+  const at = new THREE.Vector3(4.1, -2.5, 0); // typical claw workspace
   clawCam.position.copy(eye);
   const m = new THREE.Matrix4().lookAt(eye, at, new THREE.Vector3(0, 1, 0));
   clawCam.quaternion.setFromRotationMatrix(m);
