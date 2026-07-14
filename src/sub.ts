@@ -1,12 +1,19 @@
 /**
  * Rusted Sea — 3D sub prototype ("the game as it began").
  *
- * Pilot a rusty submarine through black water. One bubble of visibility,
- * silhouettes at the edge of the beam. The Sea Major model stands in for
- * the player sub until a player-scale hull exists; a second instance lies
- * wrecked on the seafloor as the salvage target.
+ * Pilot a rusty submarine, built from primitives, through black water.
+ * One bubble of visibility, silhouettes at the edge of the beam. A
+ * two-joint IK claw hangs off the nose, reaching for things. A wrecked
+ * Sea Major (the old prototype's .glb — fine for static dressing, since
+ * nothing depends on its baked orientation) lies on the seafloor as the
+ * salvage target.
  *
- * W/S thrust, A/D turn, R/F depth, drag mouse to orbit the camera.
+ * The hull is procedural rather than an imported model specifically so
+ * forward/up and every mount point (headlight, claw shoulder, camera) are
+ * numbers we chose, not numbers we reverse-engineered from someone else's
+ * export — that's what made the .glb version fiddly to wire up correctly.
+ *
+ * W/S thrust, A/D turn, R/F depth, drag mouse to orbit, E reach-and-grab.
  */
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
@@ -36,7 +43,13 @@ const camera = new THREE.PerspectiveCamera(
 );
 
 // ---------------------------------------------------------------- lights ---
-scene.add(new THREE.HemisphereLight(0x1c3a44, 0x000000, 0.14));
+const params0 = new URLSearchParams(location.search);
+scene.add(new THREE.HemisphereLight(0x1c3a44, 0x000000, params0.has("lit") ? 1.1 : 0.14));
+if (params0.has("lit")) {
+  const key = new THREE.DirectionalLight(0xffffff, 1.6);
+  key.position.set(5, 8, 6);
+  scene.add(key);
+}
 
 // the sub's headlight — the only real light in the world
 const headlight = new THREE.SpotLight(0xcfe8ff, 260, 55, 0.36, 0.5, 1.5);
@@ -48,34 +61,178 @@ headlight.target = headlightTarget;
 const runningLight = new THREE.PointLight(0xffb066, 5, 10, 1.8);
 
 // ------------------------------------------------------------- player sub ---
+// Built by hand, nose at +Z, up at +Y, centered on the group origin — every
+// number below is a coordinate we chose, so headlight/claw/camera mounts
+// are exact instead of measured off a screenshot.
+const HULL_LEN = 6.0; // cylindrical section length
+const HULL_R = 1.05;
+const NOSE_Z = HULL_LEN / 2 + HULL_R; // = 4.05, the true bow tip
+
+const rust = new THREE.MeshStandardMaterial({ color: 0x5b4636, roughness: 0.9, metalness: 0.35 });
+const rustDark = new THREE.MeshStandardMaterial({ color: 0x2e241c, roughness: 0.95, metalness: 0.2 });
+const brass = new THREE.MeshStandardMaterial({ color: 0x8a6a3a, roughness: 0.6, metalness: 0.6 });
+
 const subGroup = new THREE.Group();
 scene.add(subGroup);
 subGroup.add(headlight, runningLight);
 runningLight.position.set(0, 1.2, -1);
 
-let subReady = false;
-const loader = new GLTFLoader();
-loader.load("assets/models/sea_major.glb", (gltf) => {
-  const model = gltf.scene;
-  const box = new THREE.Box3().setFromObject(model);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-  model.position.sub(center); // center it on the group origin
-  console.log("sea_major size:", JSON.stringify(size));
+{
+  // Hull as a lathe profile, not a capsule: a blunt nose, a ribbed
+  // mid-section with slight radius steps (plating), and a tapered stern.
+  // A plain capsule reads as a smooth sausage; the radius steps and rib
+  // rings are what make the eye read "riveted machine."
+  const profile: THREE.Vector2[] = [];
+  profile.push(new THREE.Vector2(0.0, -HULL_LEN / 2 - HULL_R)); // stern point
+  profile.push(new THREE.Vector2(HULL_R * 0.55, -HULL_LEN / 2 - HULL_R * 0.55));
+  profile.push(new THREE.Vector2(HULL_R * 0.92, -HULL_LEN / 2 - HULL_R * 0.1));
+  const ribs = 5;
+  for (let i = 0; i <= ribs; i++) {
+    const z = -HULL_LEN / 2 + (HULL_LEN * i) / ribs;
+    const step = i % 2 === 0 ? 1.0 : 0.94; // alternating plating steps
+    profile.push(new THREE.Vector2(HULL_R * step, z));
+  }
+  profile.push(new THREE.Vector2(HULL_R * 0.85, HULL_LEN / 2 + HULL_R * 0.18));
+  profile.push(new THREE.Vector2(HULL_R * 0.62, HULL_LEN / 2 + HULL_R * 0.42));
+  profile.push(new THREE.Vector2(HULL_R * 0.32, HULL_LEN / 2 + HULL_R * 0.68));
+  profile.push(new THREE.Vector2(0.0, HULL_LEN / 2 + HULL_R * 0.88)); // bow point
 
-  // bbox is nearly square (antennas/tail pipe) — orient the hull by eye:
-  // profile runs along X in the glb with the tail toward +X, so -90° puts
-  // the bow on +Z (our forward). The extra correction cancels a few degrees
-  // of yaw baked into the model, which read as "veering" under thrust.
-  model.rotation.y = -Math.PI / 2 - 0.12;
-  const long = Math.max(size.x, size.z);
-  model.scale.setScalar(9 / long); // player sub ~9 units long
-  subGroup.add(model);
-  subReady = true;
-});
+  const hull = new THREE.Mesh(new THREE.LatheGeometry(profile, 24), rust);
+  hull.rotation.x = -Math.PI / 2; // lathe axis is Y; bow (+Y end) -> +Z
+  subGroup.add(hull);
+
+  // a raised keel strip and a hatch disc, purely to break up the silhouette
+  const keel = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, HULL_LEN * 0.8), rustDark);
+  keel.position.set(0, -HULL_R - 0.02, 0.2);
+  subGroup.add(keel);
+  const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.06, 16), rustDark);
+  hatch.rotation.x = Math.PI / 2;
+  hatch.position.set(0, HULL_R * 0.98, -0.6);
+  subGroup.add(hatch);
+
+  // conning tower, set back from the bow like a real hull
+  const tower = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.0, 1.6), rustDark);
+  tower.position.set(0, HULL_R + 0.45, -0.6);
+  subGroup.add(tower);
+
+  const periscope = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.05, 0.05, 1.1, 8),
+    brass,
+  );
+  periscope.position.set(0.2, HULL_R + 1.05, -0.9);
+  subGroup.add(periscope);
+
+  // tail fins (rudder + planes) so "which way is aft" is unambiguous at a
+  // glance, and a propeller nub to sell it as a machine
+  const finGeo = new THREE.BoxGeometry(0.08, 0.9, 0.7);
+  const finTop = new THREE.Mesh(finGeo, rustDark);
+  finTop.position.set(0, HULL_R * 0.55, -HULL_LEN / 2 - 0.2);
+  subGroup.add(finTop);
+  for (const side of [-1, 1]) {
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.08, 0.6), rustDark);
+    fin.position.set(side * HULL_R * 0.9, -HULL_R * 0.2, -HULL_LEN / 2 - 0.1);
+    subGroup.add(fin);
+  }
+  const prop = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.5, 8), brass);
+  prop.rotation.x = -Math.PI / 2;
+  prop.position.set(0, 0, -HULL_LEN / 2 - HULL_R - 0.15);
+  subGroup.add(prop);
+
+  // side ballast pods, riveted-industrial detail
+  for (const side of [-1, 1]) {
+    const pod = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.22, 2.6, 4, 8),
+      rustDark,
+    );
+    pod.rotation.x = Math.PI / 2;
+    pod.position.set(side * (HULL_R + 0.25), -HULL_R * 0.5, -0.4);
+    subGroup.add(pod);
+  }
+}
 
 // headlight mounted at the nose, aimed ahead (targets updated per-frame)
-headlight.position.set(0, 0.4, 4.2);
+headlight.position.set(0, 0.15, NOSE_Z - 0.3);
+
+// ------------------------------------------------------------- claw arm ---
+// Two-bone IK: a shoulder mounted under the bow reaches for a world-space
+// target. yaw+pitch at the shoulder aim the plane of the arm; a single
+// elbow bend (law of cosines) hits the target distance within that plane.
+const SHOULDER_LOCAL = new THREE.Vector3(0, -HULL_R - 0.1, NOSE_Z - 1.4);
+const UPPER_LEN = 1.5;
+const FORE_LEN = 1.4;
+
+const shoulder = new THREE.Group();
+shoulder.position.copy(SHOULDER_LOCAL);
+subGroup.add(shoulder);
+
+const upperArm = new THREE.Group(); // pitches at the shoulder
+shoulder.add(upperArm);
+const upperMesh = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.14, 0.11, UPPER_LEN, 8),
+  rustDark,
+);
+upperMesh.rotation.x = Math.PI / 2;
+upperMesh.position.z = UPPER_LEN / 2;
+upperArm.add(upperMesh);
+
+const elbow = new THREE.Group(); // pitches relative to the upper arm
+elbow.position.z = UPPER_LEN;
+upperArm.add(elbow);
+const foreMesh = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.1, 0.08, FORE_LEN, 8),
+  rustDark,
+);
+foreMesh.rotation.x = Math.PI / 2;
+foreMesh.position.z = FORE_LEN / 2;
+elbow.add(foreMesh);
+
+const clawHead = new THREE.Group();
+clawHead.position.z = FORE_LEN;
+elbow.add(clawHead);
+const fingerGeo = new THREE.ConeGeometry(0.07, 0.55, 6);
+const fingerL = new THREE.Mesh(fingerGeo, brass);
+const fingerR = new THREE.Mesh(fingerGeo, brass);
+for (const [f, side] of [[fingerL, -1], [fingerR, 1]] as const) {
+  f.rotation.x = Math.PI / 2;
+  f.position.set(side * 0.08, 0, 0.28);
+  clawHead.add(f);
+}
+
+/** Solve a 2-bone yaw/pitch+elbow IK in `shoulder`'s local space, aiming at
+ *  `targetLocal`. Rest pose (all angles 0) points the arm along local +Z. */
+function solveArm(targetLocal: THREE.Vector3): void {
+  const horiz = Math.hypot(targetLocal.x, targetLocal.z);
+  const yaw = Math.atan2(targetLocal.x, targetLocal.z);
+  const reach = THREE.MathUtils.clamp(
+    Math.hypot(horiz, targetLocal.y),
+    Math.abs(UPPER_LEN - FORE_LEN) + 0.05,
+    UPPER_LEN + FORE_LEN - 0.05,
+  );
+  const elevation = Math.atan2(targetLocal.y, horiz);
+  const shoulderOffset = Math.acos(
+    THREE.MathUtils.clamp(
+      (UPPER_LEN ** 2 + reach ** 2 - FORE_LEN ** 2) / (2 * UPPER_LEN * reach),
+      -1,
+      1,
+    ),
+  );
+  const elbowInterior = Math.acos(
+    THREE.MathUtils.clamp(
+      (UPPER_LEN ** 2 + FORE_LEN ** 2 - reach ** 2) / (2 * UPPER_LEN * FORE_LEN),
+      -1,
+      1,
+    ),
+  );
+  shoulder.rotation.y = yaw;
+  upperArm.rotation.x = -(elevation + shoulderOffset);
+  elbow.rotation.x = Math.PI - elbowInterior;
+}
+function setClaw(open: number): void {
+  // 0 = closed, 1 = open
+  fingerL.rotation.z = open * 0.5;
+  fingerR.rotation.z = -open * 0.5;
+}
+setClaw(1);
 
 // volumetric beam cone off the nose
 const beamMat = new THREE.ShaderMaterial({
@@ -120,7 +277,7 @@ beam.quaternion.setFromUnitVectors(
   new THREE.Vector3(0, 1, 0),
   new THREE.Vector3(0, 0, -1),
 );
-beam.position.set(0, 0.4, 3.6 + 11);
+beam.position.set(0, 0.15, NOSE_Z - 0.4 + 11);
 subGroup.add(beam);
 
 // anchor the beam to a visible light source: a hot lamp glow at the nose
@@ -148,15 +305,18 @@ const lampGlow = new THREE.Sprite(
 );
 lampGlow.scale.setScalar(0.8);
 (lampGlow.material as THREE.SpriteMaterial).opacity = 0.55;
-lampGlow.position.set(0, 0.4, 4.4);
+lampGlow.position.set(0, 0.15, NOSE_Z + 0.35);
 subGroup.add(lampGlow);
 // and a small real light so the bow itself catches the lamp
 const noseLight = new THREE.PointLight(0xd9edff, 7, 7, 1.8);
-noseLight.position.set(0, 0.4, 3.4);
+noseLight.position.set(0, 0.15, NOSE_Z - 0.65);
 subGroup.add(noseLight);
 
 // ------------------------------------------------------------- the wreck ---
-// A second Sea Major, dead on the seafloor — the salvage target.
+// A second, unrelated hull (the old prototype's Sea Major .glb) dead on the
+// seafloor as the salvage target — fine to use as-is here, since dressing
+// doesn't depend on knowing its exact forward axis the way the player sub did.
+const loader = new GLTFLoader();
 loader.load("assets/models/sea_major.glb", (gltf) => {
   const wreck = gltf.scene;
   const box = new THREE.Box3().setFromObject(wreck);
@@ -239,6 +399,7 @@ window.addEventListener("keyup", (e) => keys.delete(e.code));
 const params = new URLSearchParams(location.search);
 let orbitYaw = parseFloat(params.get("yaw") ?? "0");
 let orbitPitch = parseFloat(params.get("pitch") ?? "0.12");
+const camDist = parseFloat(params.get("dist") ?? "14");
 let dragging = false;
 window.addEventListener("mousedown", () => (dragging = true));
 window.addEventListener("mouseup", () => (dragging = false));
@@ -353,10 +514,22 @@ function animate() {
   const camDir = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw));
   const desired = sub.pos
     .clone()
-    .addScaledVector(camDir, -14)
-    .add(new THREE.Vector3(0, 4.5 + orbitPitch * 10, 0));
+    .addScaledVector(camDir, -camDist)
+    .add(new THREE.Vector3(0, camDist * 0.32 + orbitPitch * 10, 0));
   camera.position.lerp(desired, 1 - Math.exp(-3.5 * dt));
   camera.lookAt(sub.pos.x, sub.pos.y + 1.2, sub.pos.z);
+
+  // --- claw: idle sweep, or reach-and-grab while E is held ---
+  const grabbing = keys.has("KeyE");
+  const clawTarget = grabbing
+    ? new THREE.Vector3(0.25, -1.6, UPPER_LEN + FORE_LEN - 0.5) // reach out
+    : new THREE.Vector3(
+        Math.sin(t * 0.35) * 0.25,
+        -0.85 + Math.sin(t * 0.5) * 0.15,
+        0.5 + Math.sin(t * 0.4) * 0.2,
+      ); // folded in close under the hull
+  solveArm(clawTarget);
+  setClaw(grabbing ? 0 : 1);
 
   // --- motes wrap around the sub ---
   const p = moteGeo.attributes.position as THREE.BufferAttribute;
