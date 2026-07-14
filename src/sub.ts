@@ -200,7 +200,7 @@ function makeBeamMaterial(): THREE.ShaderMaterial {
         // drifting murk inside the beam — light through particulate
         float murk = 0.85 + 0.15 * sin(vAlong * 22.0 - time * 2.2)
                           * sin(vAlong * 9.0 - time * 1.1);
-        float a = body * fall * murk * 0.10 * uScale;
+        float a = body * fall * murk * 0.13 * uScale;
         // warm tungsten, not LED — a 60s bulb pushing through the murk
         gl_FragColor = vec4(vec3(0.95, 0.78, 0.52) * a, a);
       }
@@ -252,11 +252,12 @@ function floodlight(y: number, z: number): void {
   hullGroup.add(bulb);
   floodBulbs.push(bulbMat);
 
-  const cone = new THREE.Mesh(new THREE.ConeGeometry(1.7, 9, 24, 1, true), makeBeamMaterial());
-  // apex at the lamp, opening forward-down along the beam direction
+  // apex at the lamp, opening forward-down along the beam direction.
+  // Long enough to visually bridge the lamp to its pool on the seafloor.
   const dir = new THREE.Vector3().subVectors(tgt.position, lamp.position).normalize();
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(5.2, 26, 24, 1, true), makeBeamMaterial());
   cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), dir);
-  cone.position.copy(lamp.position).addScaledVector(dir, 4.5);
+  cone.position.copy(lamp.position).addScaledVector(dir, 13);
   hullGroup.add(cone);
 
   // scattering halo at the lamp itself — the "glow around a light in murk"
@@ -835,17 +836,56 @@ const motePos = new Float32Array(MOTES * 3);
 for (let i = 0; i < MOTES * 3; i++) motePos[i] = THREE.MathUtils.randFloatSpread(RANGE * 2);
 const moteGeo = new THREE.BufferGeometry();
 moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
-const motes = new THREE.Points(
-  moteGeo,
-  new THREE.PointsMaterial({
-    color: 0x7fa8b0,
-    size: 0.05,
-    transparent: true,
-    opacity: 0.5,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-  }),
-);
+// Marine snow that LIGHTS UP inside the floodlight cones — the particulate
+// is what makes the water in the beam path read as illuminated.
+const moteMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  uniforms: {
+    uTex: { value: softDiscTexture() },
+    uLampPos: { value: [new THREE.Vector3(), new THREE.Vector3()] },
+    uLampDir: { value: [new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 1)] },
+    uCosOuter: { value: Math.cos(0.48) },
+    uBeam: { value: 1 }, // flood level x depth scale
+  },
+  vertexShader: /* glsl */ `
+    uniform vec3 uLampPos[2];
+    uniform vec3 uLampDir[2];
+    uniform float uCosOuter;
+    uniform float uBeam;
+    varying float vBoost;
+    void main() {
+      // how strongly this mote sits inside either beam
+      float boost = 0.0;
+      for (int i = 0; i < 2; i++) {
+        vec3 v = position - uLampPos[i];
+        float d = length(v);
+        float ca = dot(v / max(d, 0.001), uLampDir[i]);
+        float cone = smoothstep(uCosOuter, uCosOuter + 0.06, ca);
+        boost += cone * exp(-d * 0.10);
+      }
+      vBoost = min(boost, 1.0) * uBeam;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mv;
+      float size = 0.05 * (1.0 + vBoost * 2.2);
+      gl_PointSize = size * (420.0 / -mv.z);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D uTex;
+    varying float vBoost;
+    void main() {
+      float tex = texture2D(uTex, gl_PointCoord).r;
+      vec3 cool = vec3(0.50, 0.66, 0.69);
+      vec3 warm = vec3(1.0, 0.85, 0.63); // tungsten catch
+      vec3 col = mix(cool, warm, vBoost);
+      float a = tex * (0.30 + vBoost * 0.85);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `,
+});
+const motes = new THREE.Points(moteGeo, moteMat);
 scene.add(motes);
 
 // thruster bubbles
@@ -1551,7 +1591,10 @@ function animate(): void {
     for (const l of floodLamps) l.intensity = FLOOD_BASE * lightScale;
     for (const h of floodHalos) h.opacity = 0.55 * lightScale;
     for (const b of floodBulbs) b.color.setScalar(0.3 + 0.7 * lightScale);
-    for (const m of beamMats) m.uniforms.uScale.value = lightScale;
+    // visible beams keep a floor so the shaft reads even in brighter water
+    const beamScale = floodLevel * (0.3 + 0.7 * df);
+    for (const m of beamMats) m.uniforms.uScale.value = beamScale;
+    moteMat.uniforms.uBeam.value = beamScale;
     bloom.strength = 0.14 + 0.31 * df;
   }
   surfaceMat.uniforms.time.value = t;
@@ -1570,6 +1613,16 @@ function animate(): void {
       rock.m.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
       rock.vel.set(0, 0, 0);
     }
+  }
+
+  // feed the mote shader the beams' world-space geometry
+  for (let i = 0; i < floodLamps.length && i < 2; i++) {
+    const lamp = floodLamps[i];
+    const lp = moteMat.uniforms.uLampPos.value[i] as THREE.Vector3;
+    const ld = moteMat.uniforms.uLampDir.value[i] as THREE.Vector3;
+    lamp.getWorldPosition(lp);
+    lamp.target.getWorldPosition(ld);
+    ld.sub(lp).normalize();
   }
 
   // beam + caustics + water-wobble animation
