@@ -448,10 +448,13 @@ let beaconLight: THREE.PointLight;
 }
 
 // ------------------------------------------------------------- grab state ---
-const GRAB_RANGE = 1.2; // forgiving: claw within this of the crate can grip it
+const GRAB_RANGE = 1.35; // forgiving: claw within this of the crate can grip it
+const CLAW_R = 0.34; // claw collision sphere
+const CRATE_R = 0.8; // crate collision sphere (approx)
 let carried: THREE.Group | null = null;
 let crateFalling = false;
 let crateVelY = 0;
+const crateVelH = new THREE.Vector3(); // horizontal slide when shoved
 const crateWorld = new THREE.Vector3();
 
 function clawInGrabRange(): boolean {
@@ -1115,20 +1118,9 @@ function animate(): void {
     beaconLight.intensity = blink ? 10 : 0;
   }
 
-  // --- pushable rocks: the claw and the hull shoulder them aside ---
+  // --- pushable rocks: hull contact shoves them; claw contact is handled
+  // by the collision constraint in the arm section ---
   for (const rock of rocks) {
-    // claw contact
-    const dc = rock.m.position.distanceTo(claw.position);
-    const minC = rock.r + 0.4;
-    if (dc < minC) {
-      const dir = rock.m.position.clone().sub(claw.position);
-      dir.y = 0;
-      if (dir.lengthSq() > 1e-6) {
-        dir.normalize();
-        rock.vel.addScaledVector(dir, (minC - dc) * 10 * dt * 60 * 0.15);
-      }
-    }
-    // hull contact (broad sphere around the sub)
     const dh = rock.m.position.distanceTo(sub.pos);
     const minH = rock.r + 1.7;
     if (dh < minH) {
@@ -1149,6 +1141,30 @@ function animate(): void {
       const spd = rock.vel.length();
       rock.m.rotation.y += spd * 0.3 * dt;
       rock.m.rotation.x += spd * 0.5 * dt;
+    }
+  }
+
+  // --- crate slides when shoved (by claw constraint or hull), hugging the
+  // sand; vertical handled by the sink logic below ---
+  if (!carried) {
+    const dhc = crate.position.distanceTo(sub.pos);
+    const minHC = CRATE_R + 1.7;
+    if (dhc < minHC) {
+      const dir = crate.position.clone().sub(sub.pos);
+      dir.y = 0;
+      if (dir.lengthSq() > 1e-6) {
+        dir.normalize();
+        crateVelH.addScaledVector(dir, (minHC - dhc) * 6 * dt * 60 * 0.15);
+      }
+    }
+    if (crateVelH.lengthSq() > 1e-6) {
+      crateVelH.multiplyScalar(Math.exp(-2.4 * dt));
+      crate.position.x += crateVelH.x * dt;
+      crate.position.z += crateVelH.z * dt;
+      crate.rotation.y += crateVelH.length() * 0.12 * dt;
+      if (!crateFalling) {
+        crate.position.y = floorHeightAt(crate.position.x, crate.position.z) + 0.45;
+      }
     }
   }
 
@@ -1267,6 +1283,26 @@ function animate(): void {
     armTarget.copy(subGroup.localToWorld(heldLocal.clone()));
   }
   smoothedTarget.lerp(armTarget, 1 - Math.exp(-8 * dt));
+
+  // --- claw collision: the claw cannot enter rocks or the crate. Its IK
+  // goal is projected back to the surface, and the denied motion becomes a
+  // shove — so driving the claw into an object pushes it along the sand. ---
+  const shove = (center: THREE.Vector3, radius: number, outVel: THREE.Vector3): void => {
+    const minD = radius + CLAW_R;
+    const d = smoothedTarget.distanceTo(center);
+    if (d >= minD) return;
+    const dir = smoothedTarget.clone().sub(center);
+    if (dir.lengthSq() < 1e-8) dir.set(0, 1, 0);
+    dir.normalize();
+    const pen = minD - d;
+    smoothedTarget.copy(center).addScaledVector(dir, minD); // claw rides the surface
+    dir.y = 0; // objects slide, they don't fly
+    if (dir.lengthSq() > 1e-8) {
+      outVel.addScaledVector(dir.normalize(), -pen * 55 * dt * 60 * 0.02);
+    }
+  };
+  for (const rock of rocks) shove(rock.m.position, rock.r, rock.vel);
+  if (!carried) shove(crate.position, CRATE_R, crateVelH);
 
   mount.getWorldPosition(baseWorld);
   solveIK(baseWorld);
@@ -1420,4 +1456,6 @@ window.addEventListener("resize", () => {
   },
   isCarried: () => carried !== null,
   inRange: () => clawInGrabRange(),
+  cratePos: () => crate.position.toArray(),
+  clawToCrate: () => claw.position.distanceTo(crate.position),
 };
