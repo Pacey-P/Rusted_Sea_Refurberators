@@ -2,3 +2,4 @@ node_modules/
 dist/
 shot*.png
 *.local
+manip*.png
