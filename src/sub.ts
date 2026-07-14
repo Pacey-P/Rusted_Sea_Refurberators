@@ -46,7 +46,8 @@ const camera = new THREE.PerspectiveCamera(
 );
 
 // ---------------------------------------------------------------- lights ---
-scene.add(new THREE.AmbientLight(0x0d2634, params.has("lit") ? 4 : 0.7));
+const ambient = new THREE.AmbientLight(0x0d2634, params.has("lit") ? 4 : 0.7);
+scene.add(ambient);
 if (params.has("lit")) {
   const key = new THREE.DirectionalLight(0xffffff, 1.6);
   key.position.set(5, 8, 6);
@@ -162,13 +163,16 @@ let navLight: THREE.Mesh;
 // grazing rim, with a slow shimmer — light scattering through water, not
 // crisp geometry.
 const beamMats: THREE.ShaderMaterial[] = [];
+const floodLamps: THREE.SpotLight[] = [];
+const floodHalos: THREE.SpriteMaterial[] = [];
+const floodBulbs: THREE.MeshBasicMaterial[] = [];
 function makeBeamMaterial(): THREE.ShaderMaterial {
   const mat = new THREE.ShaderMaterial({
     transparent: true,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     side: THREE.BackSide,
-    uniforms: { time: { value: 0 } },
+    uniforms: { time: { value: 0 }, uScale: { value: 1 } },
     vertexShader: /* glsl */ `
       varying float vAlong; // 0 at apex -> 1 at far end
       varying vec3 vNormal;
@@ -186,6 +190,7 @@ function makeBeamMaterial(): THREE.ShaderMaterial {
       varying vec3 vNormal;
       varying vec3 vView;
       uniform float time;
+      uniform float uScale;
       void main() {
         float facing = abs(dot(normalize(vNormal), normalize(vView)));
         float body = smoothstep(0.0, 0.7, facing);
@@ -193,7 +198,7 @@ function makeBeamMaterial(): THREE.ShaderMaterial {
         // drifting murk inside the beam — light through particulate
         float murk = 0.85 + 0.15 * sin(vAlong * 22.0 - time * 2.2)
                           * sin(vAlong * 9.0 - time * 1.1);
-        float a = body * fall * murk * 0.10;
+        float a = body * fall * murk * 0.10 * uScale;
         // warm tungsten, not LED — a 60s bulb pushing through the murk
         gl_FragColor = vec4(vec3(0.95, 0.78, 0.52) * a, a);
       }
@@ -233,15 +238,15 @@ function floodlight(y: number, z: number): void {
   hullGroup.add(tgt);
   lamp.target = tgt;
   hullGroup.add(lamp);
+  floodLamps.push(lamp);
 
   // the hot bulb itself — a small emissive core the bloom can catch,
   // proud of the housing so it never intersects the nose skin
-  const bulb = new THREE.Mesh(
-    new THREE.SphereGeometry(0.065, 10, 10),
-    new THREE.MeshBasicMaterial({ color: 0xfff0d0 }),
-  );
+  const bulbMat = new THREE.MeshBasicMaterial({ color: 0xfff0d0 });
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.065, 10, 10), bulbMat);
   bulb.position.set(3.18, y, z);
   hullGroup.add(bulb);
+  floodBulbs.push(bulbMat);
 
   const cone = new THREE.Mesh(new THREE.ConeGeometry(1.7, 9, 24, 1, true), makeBeamMaterial());
   // apex at the lamp, opening forward-down along the beam direction
@@ -265,6 +270,7 @@ function floodlight(y: number, z: number): void {
   (halo.material as THREE.SpriteMaterial).opacity = 0.55;
   halo.position.copy(lamp.position).addScaledVector(dir, 0.25);
   hullGroup.add(halo);
+  floodHalos.push(halo.material as THREE.SpriteMaterial);
 }
 floodlight(0.35, 0.45);
 floodlight(0.35, -0.45);
@@ -319,43 +325,130 @@ const shoulderBall = addShadow(new THREE.Mesh(new THREE.SphereGeometry(0.22, 14,
 shoulderBall.position.copy(mount.position);
 hullGroup.add(shoulderBall);
 
-// --------------------------------------------------------------- seafloor ---
-const floorY = -6.5;
-// world-space terrain height (must mirror the displacement below; the plane
-// is rotated -90° about X, so world z maps to plane -y)
-function floorHeightAt(wx: number, wz: number): number {
-  const x = wx;
-  const y = -wz;
-  return (
-    floorY +
-    Math.sin(x * 0.22) * Math.cos(y * 0.18) * 0.9 +
-    Math.sin(x * 0.05 + y * 0.07) * 1.6 +
-    Math.sin(x * 1.3) * Math.sin(y * 1.1) * 0.12
-  );
+// ------------------------------------------------- infinite ocean terrain ---
+// One world-space height function, written twice (TS + GLSL, identical):
+// a tanh'd low-frequency field carves shallow sunlit banks (~-5) and deep
+// trenches (~-45) with steep, short transitions; ridges and dunes detail it.
+const SURFACE_Y = 8;
+function floorHeightAt(x: number, z: number): number {
+  const v =
+    Math.sin(x * 0.016 + 1.7) * Math.sin(z * 0.013 + 0.4) +
+    0.6 * Math.sin(x * 0.007 - z * 0.009 + 3.0);
+  const band = Math.tanh(v * 2.2);
+  const zone = -44 + (band + 1) * 0.5 * (44 - 4.5); // mix(-44, -4.5)
+  const r =
+    Math.sin(x * 0.06 + z * 0.045) * 2.2 + Math.sin(x * 0.11 - z * 0.08 + 2.0) * 1.2;
+  const d =
+    Math.sin(x * 0.22) * Math.cos(z * 0.18) * 0.9 +
+    Math.sin(x * 1.3) * Math.sin(z * 1.1) * 0.12;
+  return zone + r + d;
 }
-{
-  const g = new THREE.PlaneGeometry(300, 300, 160, 160);
-  const pos = g.attributes.position as THREE.BufferAttribute;
-  for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i);
-    const y = pos.getY(i);
-    pos.setZ(
-      i,
-      Math.sin(x * 0.22) * Math.cos(y * 0.18) * 0.9 +
-        Math.sin(x * 0.05 + y * 0.07) * 1.6 +
-        Math.sin(x * 1.3) * Math.sin(y * 1.1) * 0.12,
-    );
+const TERRAIN_GLSL = /* glsl */ `
+  float terrainH(vec2 p) {
+    float v = sin(p.x * 0.016 + 1.7) * sin(p.y * 0.013 + 0.4)
+            + 0.6 * sin(p.x * 0.007 - p.y * 0.009 + 3.0);
+    float band = tanh(v * 2.2);
+    float zone = mix(-44.0, -4.5, (band + 1.0) * 0.5);
+    float r = sin(p.x * 0.06 + p.y * 0.045) * 2.2
+            + sin(p.x * 0.11 - p.y * 0.08 + 2.0) * 1.2;
+    float d = sin(p.x * 0.22) * cos(p.y * 0.18) * 0.9
+            + sin(p.x * 1.3) * sin(p.y * 1.1) * 0.12;
+    return zone + r + d;
   }
-  g.computeVertexNormals();
-  const floor = new THREE.Mesh(
-    g,
-    new THREE.MeshStandardMaterial({ color: 0x0a1a22, roughness: 1, metalness: 0 }),
-  );
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = floorY;
-  floor.receiveShadow = true;
-  scene.add(floor);
+`;
+
+// The floor is a big plane that FOLLOWS the sub; vertices are displaced in
+// the vertex shader by the world-space height, so the terrain flows under a
+// fixed grid — effectively infinite, no chunks, no popping.
+const floorUniforms = { uOffset: { value: new THREE.Vector2() } };
+let floorMesh: THREE.Mesh;
+{
+  const g = new THREE.PlaneGeometry(520, 520, 210, 210);
+  g.rotateX(-Math.PI / 2); // bake orientation so local == world axes
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 });
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uOffset = floorUniforms.uOffset;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>\nuniform vec2 uOffset;\nvarying float vH;\n${TERRAIN_GLSL}`,
+      )
+      .replace(
+        "#include <beginnormal_vertex>",
+        /* glsl */ `
+        vec2 wxz = position.xz + uOffset;
+        float e = 1.2;
+        float hC = terrainH(wxz);
+        float hX = terrainH(wxz + vec2(e, 0.0)) - terrainH(wxz - vec2(e, 0.0));
+        float hZ = terrainH(wxz + vec2(0.0, e)) - terrainH(wxz - vec2(0.0, e));
+        vec3 objectNormal = normalize(vec3(-hX / (2.0 * e), 1.0, -hZ / (2.0 * e)));
+        `,
+      )
+      .replace(
+        "#include <begin_vertex>",
+        /* glsl */ `
+        vec3 transformed = vec3(position.x, hC, position.z);
+        vH = hC;
+        `,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying float vH;")
+      .replace(
+        "#include <color_fragment>",
+        /* glsl */ `
+        #include <color_fragment>
+        // sunlit sand on the banks, cold mud in the deep
+        vec3 mud = vec3(0.039, 0.10, 0.13);
+        vec3 sand = vec3(0.45, 0.40, 0.28);
+        diffuseColor.rgb *= mix(mud, sand, smoothstep(-26.0, -6.0, vH));
+        `,
+      );
+  };
+  floorMesh = new THREE.Mesh(g, mat);
+  floorMesh.receiveShadow = true;
+  scene.add(floorMesh);
 }
+
+// water surface, seen from below: a bright rippling sheet that only reads
+// when you're up in the shallows
+const surfaceMat = new THREE.ShaderMaterial({
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  uniforms: {
+    time: { value: 0 },
+    uFade: { value: 0 },
+    camPos: { value: new THREE.Vector3() },
+  },
+  vertexShader: /* glsl */ `
+    varying vec3 vWorld;
+    void main() {
+      vec4 w = modelMatrix * vec4(position, 1.0);
+      vWorld = w.xyz;
+      gl_Position = projectionMatrix * viewMatrix * w;
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    varying vec3 vWorld;
+    uniform float time;
+    uniform float uFade;
+    uniform vec3 camPos;
+    void main() {
+      vec2 p = vWorld.xz;
+      float c1 = sin(p.x * 0.5 + time * 0.9) * sin(p.y * 0.55 - time * 0.7);
+      float c2 = sin((p.x + p.y) * 0.32 + time * 1.1) * sin((p.x - p.y) * 0.3 - time * 0.5);
+      float shimmer = pow(abs(c1 * 0.6 + c2 * 0.4), 2.0);
+      float fade = exp(-distance(camPos, vWorld) * 0.02);
+      float a = shimmer * fade * uFade * 0.35;
+      gl_FragColor = vec4(vec3(0.55, 0.85, 0.9) * a, a);
+    }
+  `,
+});
+const surfaceMesh = new THREE.Mesh(new THREE.PlaneGeometry(700, 700, 1, 1), surfaceMat);
+surfaceMesh.rotation.x = -Math.PI / 2;
+surfaceMesh.position.y = SURFACE_Y + 1.5;
+scene.add(surfaceMesh);
 // caustics: an additive overlay just above the sand — interfering wave
 // patterns crawling slowly, faded by distance so the fog stays in charge
 const causticsMat = new THREE.ShaderMaterial({
@@ -368,8 +461,10 @@ const causticsMat = new THREE.ShaderMaterial({
   },
   vertexShader: /* glsl */ `
     varying vec3 vWorld;
+    ${TERRAIN_GLSL}
     void main() {
       vec4 w = modelMatrix * vec4(position, 1.0);
+      w.y = terrainH(w.xz) + 0.25; // drape the caustic sheet over the terrain
       vWorld = w.xyz;
       gl_Position = projectionMatrix * viewMatrix * w;
     }
@@ -385,18 +480,17 @@ const causticsMat = new THREE.ShaderMaterial({
       float c2 = sin((p.x + p.y) * 0.6 + t * 0.7) * sin((p.x - p.y) * 0.52 - t * 0.33);
       float c3 = sin(p.x * 1.7 - t * 0.9) * sin(p.y * 1.5 + t * 0.6);
       float ca = pow(abs(c1 * 0.5 + c2 * 0.35 + c3 * 0.15), 3.0);
-      float fade = exp(-distance(camPos, vWorld) * 0.055);
-      float a = ca * fade * 0.22;
-      gl_FragColor = vec4(vec3(0.35, 0.75, 0.72) * a, a);
+      float fade = exp(-distance(camPos, vWorld) * 0.045);
+      // sunlight only reaches the banks: caustics die with depth
+      float sun = smoothstep(-26.0, -8.0, vWorld.y);
+      float a = ca * fade * sun * 0.34;
+      gl_FragColor = vec4(vec3(0.4, 0.8, 0.75) * a, a);
     }
   `,
 });
-{
-  const overlay = new THREE.Mesh(new THREE.PlaneGeometry(300, 300, 1, 1), causticsMat);
-  overlay.rotation.x = -Math.PI / 2;
-  overlay.position.y = floorY + 1.9; // rides just above the dune crests
-  scene.add(overlay);
-}
+const causticsMesh = new THREE.Mesh(new THREE.PlaneGeometry(520, 520, 96, 96), causticsMat);
+causticsMesh.rotation.x = -Math.PI / 2;
+scene.add(causticsMesh);
 
 // rocks — pushable: the claw (and the hull) can nudge them around
 type Rock = { m: THREE.Mesh; r: number; rest: number; vel: THREE.Vector3 };
@@ -408,16 +502,14 @@ const rocks: Rock[] = [];
     const r = addShadow(new THREE.Mesh(new THREE.DodecahedronGeometry(geoR, 0), rockMat));
     const a = Math.random() * Math.PI * 2;
     const d = 6 + Math.random() * 45;
-    r.position.set(Math.cos(a) * d, floorY + 0.3 + Math.random() * 0.4, Math.sin(a) * d);
+    const rx = Math.cos(a) * d;
+    const rz = Math.sin(a) * d;
+    const rest = geoR * 0.2;
+    r.position.set(rx, floorHeightAt(rx, rz) + rest, rz);
     r.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
     r.scale.y = 0.5 + Math.random() * 0.5;
     scene.add(r);
-    rocks.push({
-      m: r,
-      r: geoR * 0.85,
-      rest: r.position.y - floorHeightAt(r.position.x, r.position.z),
-      vel: new THREE.Vector3(),
-    });
+    rocks.push({ m: r, r: geoR * 0.85, rest, vel: new THREE.Vector3() });
   }
 }
 
@@ -442,10 +534,12 @@ let beaconLight: THREE.PointLight;
   beaconLight = new THREE.PointLight(0xe0a458, 0, 5, 1.8);
   beaconLight.position.copy(beacon.position);
   crate.add(beaconLight);
-  crate.position.set(2.6, floorY + 1.15, 2.2);
+  crate.position.set(2.6, floorHeightAt(2.6, 2.2) + 0.45, 2.2);
   crate.rotation.y = 0.5;
   scene.add(crate);
 }
+// the op site's local ground level anchors the drone's patrol altitude
+const siteGroundY = floorHeightAt(2.6, 2.2);
 
 // ------------------------------------------------------------- grab state ---
 const GRAB_RANGE = 1.35; // forgiving: claw within this of the crate can grip it
@@ -470,7 +564,7 @@ new GLTFLoader().load("assets/models/sea_major.glb", (gltf) => {
   const size = box.getSize(new THREE.Vector3());
   if (size.x > size.z) wreck.rotation.y = Math.PI / 2;
   wreck.scale.setScalar(26 / Math.max(size.x, size.z));
-  wreck.position.set(26, floorY - 1.5, 42);
+  wreck.position.set(26, floorHeightAt(26, 42) - 1.5, 42);
   wreck.rotation.z = 0.34;
   wreck.rotation.y = 2.3;
   scene.add(wreck);
@@ -583,7 +677,7 @@ const tentacles: { arm: THREE.Group; elbow: THREE.Group; s: number }[] = [];
     droneChassis.add(arm);
     tentacles.push({ arm, elbow, s });
   }
-  drone.position.set(crate.position.x + 4.6, floorY + 3.3, crate.position.z);
+  drone.position.set(crate.position.x + 4.6, siteGroundY + 3.3, crate.position.z);
 }
 
 // -------------------------------------------------------- IK arm (FABRIK) ---
@@ -965,9 +1059,13 @@ let padYConsumed = false;
 // ------------------------------------------------------------------- post ---
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-composer.addPass(
-  new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.45, 0.6, 0.8),
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.45,
+  0.6,
+  0.8,
 );
+composer.addPass(bloom);
 const underwaterPass = new ShaderPass({
   uniforms: {
     tDiffuse: { value: null },
@@ -1193,7 +1291,7 @@ function animate(): void {
   const dAng = t * 0.26 + Math.sin(t * 0.11) * 1.4;
   drone.position.set(
     crate.position.x + Math.cos(dAng) * orbR,
-    floorY + 3.3 + Math.sin(t * 0.5) * 0.35,
+    siteGroundY + 3.3 + Math.sin(t * 0.5) * 0.35,
     crate.position.z + Math.sin(dAng) * orbR * 0.72,
   );
   lookTmp.set(
@@ -1247,7 +1345,7 @@ function animate(): void {
       raycaster.setFromCamera(mouse, camera);
       const hit = new THREE.Vector3();
       if (raycaster.ray.intersectPlane(targetPlane, hit)) {
-        hit.y = Math.max(hit.y, floorY + 0.55);
+        hit.y = Math.max(hit.y, floorHeightAt(hit.x, hit.z) + 0.35);
         armTarget.copy(hit);
       }
     }
@@ -1273,7 +1371,7 @@ function animate(): void {
     if (off.length() > TOTAL * 1.15) {
       armTarget.copy(baseWorld).addScaledVector(off.normalize(), TOTAL * 1.15);
     }
-    armTarget.y = Math.max(armTarget.y, floorY + 0.55);
+    armTarget.y = Math.max(armTarget.y, floorHeightAt(armTarget.x, armTarget.z) + 0.35);
   } else if (armStowed) {
     // PILOT, stowed: arm folds in under the bow
     mount.getWorldPosition(baseWorld);
@@ -1316,8 +1414,8 @@ function animate(): void {
     const pen = minR - horiz;
     smoothedTarget.x = center.x + nx * minR; // claw rides the flank
     smoothedTarget.z = center.z + nz * minR;
-    outVel.x += -nx * pen * 66 * dt;
-    outVel.z += -nz * pen * 66 * dt;
+    outVel.x += -nx * pen * 38 * dt;
+    outVel.z += -nz * pen * 38 * dt;
   };
   for (const rock of rocks) shove(rock.m.position, rock.r, rock.r * 0.7, rock.vel);
   if (!carried) shove(crate.position, CRATE_R, 0.6, crateVelH);
@@ -1401,6 +1499,56 @@ function animate(): void {
     b.position.z += Math.cos(t * 8 + bi * 2.3) * dt * (0.15 + throttle * 0.8);
     b.position.y += dt * (0.5 + life * (0.6 + throttle * 0.5));
     (b.material as THREE.MeshBasicMaterial).opacity = (0.22 + throttle * 0.15) * (1 - life);
+  }
+
+  // --- the ocean follows the sub: terrain flows under a fixed grid ---
+  floorMesh.position.set(sub.pos.x, 0, sub.pos.z);
+  floorUniforms.uOffset.value.set(sub.pos.x, sub.pos.z);
+  causticsMesh.position.set(sub.pos.x, 0, sub.pos.z);
+  surfaceMesh.position.set(sub.pos.x, SURFACE_Y + 1.5, sub.pos.z);
+
+  // --- depth-driven atmosphere: sunlit turquoise banks, black trenches ---
+  if (!params.has("lit")) {
+    const df = THREE.MathUtils.clamp((SURFACE_Y - sub.pos.y) / 42, 0, 1); // 0 surface -> 1 deep
+    const shallow = 1 - df;
+    ambient.intensity = 0.14 + shallow * 1.35;
+    moon.intensity = 0.25 + shallow * 1.9;
+    const fog = scene.fog as THREE.FogExp2;
+    fog.color.setRGB(
+      0.008 + shallow * 0.055,
+      0.045 + shallow * 0.24,
+      0.065 + shallow * 0.3,
+    );
+    fog.density = 0.03 + df * 0.055;
+    (scene.background as THREE.Color).copy(fog.color);
+    surfaceMat.uniforms.uFade.value = shallow * shallow;
+
+    // headlights auto-dim in daylight (nobody runs floods at noon) — this
+    // keeps additive halos/bulbs/beams from blowing out the sunlit shallows
+    // while leaving the deep-water look untouched
+    const lightScale = 0.12 + df * 0.88;
+    for (const l of floodLamps) l.intensity = 2800 * lightScale;
+    for (const h of floodHalos) h.opacity = 0.55 * lightScale;
+    for (const b of floodBulbs) b.color.setScalar(0.45 + 0.55 * lightScale);
+    for (const m of beamMats) m.uniforms.uScale.value = lightScale;
+    bloom.strength = 0.14 + 0.31 * df;
+  }
+  surfaceMat.uniforms.time.value = t;
+  surfaceMat.uniforms.camPos.value.copy(camera.position);
+
+  // --- infinite props: rocks that fall too far behind respawn ahead ---
+  for (const rock of rocks) {
+    const dx = rock.m.position.x - sub.pos.x;
+    const dz = rock.m.position.z - sub.pos.z;
+    if (dx * dx + dz * dz > 70 * 70) {
+      const a = Math.random() * Math.PI * 2;
+      const d = 30 + Math.random() * 32;
+      const rx = sub.pos.x + Math.cos(a) * d;
+      const rz = sub.pos.z + Math.sin(a) * d;
+      rock.m.position.set(rx, floorHeightAt(rx, rz) + rock.rest, rz);
+      rock.m.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+      rock.vel.set(0, 0, 0);
+    }
   }
 
   // beam + caustics + water-wobble animation

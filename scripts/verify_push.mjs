@@ -15,16 +15,18 @@ await page.goto("http://localhost:5199/sub.html?yaw=0.7&pitch=0.25&dist=7", {
 });
 await new Promise((r) => setTimeout(r, 2500));
 
-await page.evaluate(() => window.__dbg.setSubPos(2.6, -3.4, 0.2));
-await page.keyboard.press("Tab"); // MANIPULATOR
-await new Promise((r) => setTimeout(r, 600));
-
 const cratePos = () => page.evaluate(() => window.__dbg.cratePos());
 const clawToCrate = () => page.evaluate(() => window.__dbg.clawToCrate());
 
 const before = await cratePos();
+await page.evaluate(
+  ([x, y, z]) => window.__dbg.setSubPos(x, y + 2.0, z - 2.0),
+  before,
+);
+await page.keyboard.press("Tab"); // MANIPULATOR
+await new Promise((r) => setTimeout(r, 600));
 // drive the target INTO / THROUGH the crate center repeatedly
-await page.evaluate(() => window.__dbg.setArmTarget(2.6, -5.35, 2.2));
+await page.evaluate(([x, y, z]) => window.__dbg.setArmTarget(x, y, z), before);
 await new Promise((r) => setTimeout(r, 2500));
 const during = await clawToCrate();
 const after = await cratePos();

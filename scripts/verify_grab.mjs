@@ -16,10 +16,20 @@ await page.goto("http://localhost:5199/sub.html?yaw=0.7&pitch=0.25&dist=7", {
 });
 await new Promise((r) => setTimeout(r, 2500));
 
-await page.evaluate(() => window.__dbg.setSubPos(2.6, -3.4, 0.2));
+// derive positions from wherever the crate actually sits on the terrain
+const [cx, cy, cz] = await page.evaluate(() => window.__dbg.cratePos());
+await page.evaluate(
+  ([x, y, z]) => window.__dbg.setSubPos(x, y + 2.0, z - 2.0),
+  [cx, cy, cz],
+);
 await page.keyboard.press("Tab"); // MANIPULATOR
 await new Promise((r) => setTimeout(r, 600));
-await page.evaluate(() => window.__dbg.setArmTarget(2.6, -5.0, 2.2)); // at the crate
+// grab technique: come from ABOVE (the collision cylinder is open on top,
+// so a side approach shoves the crate away — by design)
+await page.evaluate(
+  ([x, y, z]) => window.__dbg.setArmTarget(x, y + 0.8, z),
+  [cx, cy, cz],
+);
 await new Promise((r) => setTimeout(r, 1500));
 const inRange = await page.evaluate(() => window.__dbg.inRange());
 console.log("in grab range (beacon green):", inRange);
