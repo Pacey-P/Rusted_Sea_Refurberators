@@ -1385,12 +1385,15 @@ function animate(): void {
   // --- camera: soft third-person follow with orbit ---
   const camYaw = sub.yaw + orbitYaw;
   const camDirV = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw));
+  // sit lower and look THROUGH the sub toward the horizon — forward-angled
+  // chase cam rather than a top-down inspection view
   const desired = sub.pos
     .clone()
     .addScaledVector(camDirV, -camDist)
-    .add(new THREE.Vector3(0, camDist * 0.32 + orbitPitch * 10, 0));
+    .add(new THREE.Vector3(0, camDist * 0.16 + orbitPitch * 10, 0));
   camera.position.lerp(desired, 1 - Math.exp(-3.5 * dt));
-  camera.lookAt(sub.pos.x, sub.pos.y + 0.6, sub.pos.z);
+  const lookAhead = sub.pos.clone().addScaledVector(camDirV, 2.4);
+  camera.lookAt(lookAhead.x, sub.pos.y + 0.9, lookAhead.z);
 
   // --- arm target ---
   if (mode === "MANIPULATOR") {
