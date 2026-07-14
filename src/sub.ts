@@ -194,7 +194,8 @@ function makeBeamMaterial(): THREE.ShaderMaterial {
         float murk = 0.85 + 0.15 * sin(vAlong * 22.0 - time * 2.2)
                           * sin(vAlong * 9.0 - time * 1.1);
         float a = body * fall * murk * 0.10;
-        gl_FragColor = vec4(vec3(0.62, 0.85, 0.82) * a, a);
+        // warm tungsten, not LED — a 60s bulb pushing through the murk
+        gl_FragColor = vec4(vec3(0.95, 0.78, 0.52) * a, a);
       }
     `,
   });
@@ -223,7 +224,7 @@ function floodlight(y: number, z: number): void {
   housing.rotation.z = Math.PI / 2 - 0.35;
   housing.position.set(3.02, y, z);
   hullGroup.add(housing);
-  const lamp = new THREE.SpotLight(0xbfe9e2, 560, 34, 0.48, 0.55, 1.4);
+  const lamp = new THREE.SpotLight(0xffd9a0, 560, 34, 0.48, 0.55, 1.4);
   lamp.position.set(3.14, y, z);
   lamp.castShadow = true;
   lamp.shadow.mapSize.set(512, 512);
@@ -237,7 +238,7 @@ function floodlight(y: number, z: number): void {
   // proud of the housing so it never intersects the nose skin
   const bulb = new THREE.Mesh(
     new THREE.SphereGeometry(0.065, 10, 10),
-    new THREE.MeshBasicMaterial({ color: 0xeaffff }),
+    new THREE.MeshBasicMaterial({ color: 0xfff0d0 }),
   );
   bulb.position.set(3.18, y, z);
   hullGroup.add(bulb);
@@ -253,7 +254,7 @@ function floodlight(y: number, z: number): void {
   const halo = new THREE.Sprite(
     new THREE.SpriteMaterial({
       map: discTex,
-      color: 0xbfe9e2,
+      color: 0xffd9a4,
       transparent: true,
       opacity: 0.35,
       blending: THREE.AdditiveBlending,
