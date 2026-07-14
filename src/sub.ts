@@ -36,7 +36,7 @@ document.body.appendChild(renderer.domElement);
 const WATER = new THREE.Color("#03121c");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#020a12");
-scene.fog = new THREE.FogExp2(WATER, 0.05);
+scene.fog = new THREE.FogExp2(WATER, 0.03);
 
 const camera = new THREE.PerspectiveCamera(
   55,
@@ -1580,7 +1580,7 @@ function animate(): void {
       0.045 + shallow * 0.24,
       0.065 + shallow * 0.3,
     );
-    fog.density = 0.021 + df * 0.0385; // ~30% clearer water across the board
+    fog.density = 0.012 + df * 0.023; // clear water; the dark does the hiding
     (scene.background as THREE.Color).copy(fog.color);
     surfaceMat.uniforms.uFade.value = shallow * shallow;
 
