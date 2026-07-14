@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rusted Sea — 3D sub prototype</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #01060a; overflow: hidden; }
+      canvas { display: block; }
+      #hud {
+        position: fixed; left: 14px; bottom: 12px;
+        color: #7fa3ab; font: 13px "Bahnschrift", "Segoe UI", sans-serif;
+        letter-spacing: 0.06em; opacity: 0.75; user-select: none;
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">W/S thrust &nbsp;·&nbsp; A/D turn &nbsp;·&nbsp; R/F depth &nbsp;·&nbsp; drag mouse to look</div>
+    <script type="module" src="/src/sub.ts"></script>
+  </body>
+</html>

@@ -31,6 +31,13 @@ npm run dev            # http://localhost:5199 (or vite's default port)
 node scripts/shot.mjs out.png   # headless screenshot of the running scene
 ```
 
+## 3D sub prototype
+
+`/sub.html` — pilotable 3D submarine in void water (the sub-centric 3D
+direction under evaluation). W/S thrust, A/D turn, R/F depth, drag to look.
+A wrecked Sea Major lies ~55m ahead in the fog; fly to it. Debug camera:
+`?yaw=<rad>&pitch=<rad>`.
+
 ## Milestones
 
 - [x] **M0** — lighting proof: Spine pipeline + relit original art
