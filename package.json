@@ -1,0 +1,21 @@
+{
+  "name": "rusted-sea-refurberators",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@esotericsoftware/spine-threejs": "~4.2.119",
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.170.0",
+    "puppeteer-core": "^24.43.1",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  }
+}

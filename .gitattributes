@@ -1,0 +1,4 @@
+* text=auto
+*.atlas -text
+*.skel binary
+*.png binary
