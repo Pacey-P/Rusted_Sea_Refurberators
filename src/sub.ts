@@ -224,7 +224,7 @@ function floodlight(y: number, z: number): void {
   housing.rotation.z = Math.PI / 2 - 0.35;
   housing.position.set(3.02, y, z);
   hullGroup.add(housing);
-  const lamp = new THREE.SpotLight(0xffd9a0, 560, 34, 0.48, 0.55, 1.4);
+  const lamp = new THREE.SpotLight(0xffd9a0, 2800, 170, 0.48, 0.55, 1.4);
   lamp.position.set(3.14, y, z);
   lamp.castShadow = true;
   lamp.shadow.mapSize.set(512, 512);
