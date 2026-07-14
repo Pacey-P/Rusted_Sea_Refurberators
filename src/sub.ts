@@ -596,11 +596,19 @@ clawBulb.position.set(0, -0.09, 0.06); // under the wrist, out of the cam's eye
 claw.add(clawBulb);
 clawLamp.position.set(0, -0.09, 0.05);
 
-const clawCam = new THREE.PerspectiveCamera(62, 300 / 170, 0.05, 60);
-clawCam.position.set(0, 0.42, -1.0); // over-the-shoulder of the wrist
-clawCam.rotation.y = Math.PI; // camera looks down -Z; claw forward is +Z
-clawCam.rotation.x = -0.18; // tilted down toward the fingertips
-claw.add(clawCam);
+// Manip cam: hull-mounted on the bow above the arm's shoulder, angled
+// down-and-forward so the feed shows the WHOLE arm working — shoulder,
+// elbow, claw, and the seafloor beyond. (Riding on the claw itself was
+// too tight to be useful.) Local orientation solved in hull space.
+const clawCam = new THREE.PerspectiveCamera(68, 300 / 170, 0.05, 60);
+{
+  const eye = new THREE.Vector3(2.75, -0.35, 0); // bow chin, above the shoulder
+  const at = new THREE.Vector3(3.8, -2.4, 0); // typical claw workspace
+  clawCam.position.copy(eye);
+  const m = new THREE.Matrix4().lookAt(eye, at, new THREE.Vector3(0, 1, 0));
+  clawCam.quaternion.setFromRotationMatrix(m);
+  hullGroup.add(clawCam);
+}
 
 // target reticle
 const reticle = new THREE.Group();
@@ -735,11 +743,13 @@ type PadState = {
   lx: number; ly: number; rx: number; ry: number;
   lt: number; rt: number;
   pressed: (i: number) => boolean; // edge-triggered
+  held: (i: number) => boolean; // level-triggered (d-pad etc.)
 };
 function readPad(): PadState | null {
   const gp = navigator.getGamepads?.()?.[0];
   if (!gp) return null;
   const edges: boolean[] = gp.buttons.map((b, i) => b.pressed && !prevButtons[i]);
+  const down: boolean[] = gp.buttons.map((b) => b.pressed);
   gp.buttons.forEach((b, i) => (prevButtons[i] = b.pressed));
   return {
     lx: dz(gp.axes[0] ?? 0),
@@ -749,8 +759,12 @@ function readPad(): PadState | null {
     lt: gp.buttons[6]?.value ?? 0,
     rt: gp.buttons[7]?.value ?? 0,
     pressed: (i) => edges[i] ?? false,
+    held: (i) => down[i] ?? false,
   };
 }
+// standard mapping d-pad indices
+const DPAD_UP = 12;
+const DPAD_DOWN = 13;
 
 // ------------------------------------------------------------------- HUD ---
 const modeEl = document.getElementById("mode")!;
@@ -986,12 +1000,15 @@ function animate(): void {
       }
     }
     // Gamepad: sub-relative "work table" — left stick slides the target
-    // laterally/fore-aft in the horizontal plane, triggers raise/lower it.
+    // laterally/fore-aft in the horizontal plane; d-pad up/down (or the
+    // triggers) raise and lower it. Lateral sign flipped per playtest.
     if (pad) {
       const rightVec = new THREE.Vector3(Math.cos(sub.yaw), 0, -Math.sin(sub.yaw));
-      armTarget.addScaledVector(rightVec, pad.lx * 3.4 * dt);
+      armTarget.addScaledVector(rightVec, -pad.lx * 3.4 * dt);
       armTarget.addScaledVector(forward, -pad.ly * 3.4 * dt);
-      armTarget.y += (pad.rt - pad.lt) * 2.6 * dt;
+      const lift =
+        (pad.held(DPAD_UP) ? 1 : 0) - (pad.held(DPAD_DOWN) ? 1 : 0) + (pad.rt - pad.lt);
+      armTarget.y += lift * 2.6 * dt;
     }
     // keep the target sane: reachable-ish sphere around the shoulder, above sand
     mount.getWorldPosition(baseWorld);
