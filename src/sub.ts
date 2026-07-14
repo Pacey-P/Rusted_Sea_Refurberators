@@ -174,15 +174,42 @@ function floodlight(y: number, z: number): void {
       side: THREE.DoubleSide,
     }),
   );
-  cone.position.copy(lamp.position);
+  // apex at the lamp, opening forward-down along the beam direction.
+  // (The reference negated the direction here, which flipped the visible
+  // cone 180° — up and backward. Cone axis tip->base is local -Y, so map
+  // -Y onto dir and push the center half a length along the beam.)
   const dir = new THREE.Vector3().subVectors(tgt.position, lamp.position).normalize();
-  cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), dir.clone().negate());
-  cone.translateY(-4.5);
+  cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), dir);
+  cone.position.copy(lamp.position).addScaledVector(dir, 4.5);
   hullGroup.add(cone);
   beams.push(cone);
 }
 floodlight(0.35, 0.45);
 floodlight(0.35, -0.45);
+
+// warm hull self-lighting: a soft amber wash from above the sail plus
+// port/starboard running lamps, so the hull reads as a 3D machine instead
+// of a flat silhouette. Kept dim — the dark is still the point.
+{
+  const hullWarm = new THREE.PointLight(0xffb066, 6, 9, 1.8);
+  hullWarm.position.set(0.4, 1.9, 0);
+  hullGroup.add(hullWarm);
+
+  for (const [z, color] of [
+    [0.98, 0xff3b2e], // port (red)
+    [-0.98, 0x2eff7d], // starboard (green)
+  ] as const) {
+    const lampMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.045, 8, 8),
+      new THREE.MeshBasicMaterial({ color }),
+    );
+    lampMesh.position.set(1.35, 0.32, z);
+    hullGroup.add(lampMesh);
+    const glow = new THREE.PointLight(color, 1.6, 2.6, 1.8);
+    glow.position.copy(lampMesh.position);
+    hullGroup.add(glow);
+  }
+}
 
 // arm mount under the bow
 const mount = new THREE.Object3D();
