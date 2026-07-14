@@ -39,6 +39,19 @@
       .frame::after{bottom:-1px;right:-1px;border-width:0 2px 2px 0;}
       #rec{display:inline-block;width:8px;height:8px;border-radius:50%;
         background:#c0392b;margin-right:6px;animation:blink 1.6s steps(1) infinite;}
+      #pip{
+        position:absolute;left:14px;bottom:96px;width:300px;height:170px;
+        border:1px solid rgba(143,214,200,.4);
+        box-shadow:0 0 0 1px rgba(0,0,0,.6), inset 0 0 24px rgba(0,0,0,.35);
+      }
+      #pip .piplabel{
+        position:absolute;top:4px;left:8px;font-size:9px;color:var(--hud-dim);
+        letter-spacing:.2em;
+      }
+      #pip::after{
+        content:"";position:absolute;right:6px;top:6px;width:6px;height:6px;
+        border-radius:50%;background:#c0392b;animation:blink 1.1s steps(1) infinite;
+      }
       @keyframes blink{50%{opacity:.15;}}
       @media (prefers-reduced-motion: reduce){ #rec{animation:none;} }
       @media (max-width:600px){ .bl,.br{font-size:9px;} }
@@ -72,6 +85,7 @@
         <div>THERMOCLINE STABLE</div>
         <div>VIS 6M · CURRENT 0.4KN</div>
       </div>
+      <div id="pip"><span class="piplabel">MANIP CAM · CH2</span></div>
     </div>
     <script type="module" src="/src/sub.ts"></script>
   </body>

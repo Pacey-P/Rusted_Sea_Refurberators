@@ -136,14 +136,18 @@ let navLight: THREE.Mesh;
   hullGroup.add(shroud);
   propGroup = new THREE.Group();
   propGroup.position.x = -3.15;
+  // brighter steel so the spinning blades actually read in the dark
+  const propMat = new THREE.MeshStandardMaterial({ color: 0x424a52, roughness: 0.5, metalness: 0.55 });
   for (let i = 0; i < 4; i++) {
-    const b = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.42, 0.12), panelMat);
+    const b = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.42, 0.14), propMat);
     b.position.y = 0.22;
     const holder = new THREE.Group();
     holder.add(b);
     holder.rotation.x = (i * Math.PI) / 2;
     propGroup.add(holder);
   }
+  const hub = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 8), propMat);
+  propGroup.add(hub);
   hullGroup.add(propGroup);
 }
 
@@ -210,7 +214,7 @@ function floodlight(y: number, z: number): void {
   housing.rotation.z = Math.PI / 2 - 0.35;
   housing.position.set(2.6, y, z);
   hullGroup.add(housing);
-  const lamp = new THREE.SpotLight(0xbfe9e2, 220, 26, 0.5, 0.55, 1.4);
+  const lamp = new THREE.SpotLight(0xbfe9e2, 560, 34, 0.48, 0.55, 1.4);
   lamp.position.set(2.7, y, z);
   lamp.castShadow = true;
   lamp.shadow.mapSize.set(512, 512);
@@ -219,6 +223,14 @@ function floodlight(y: number, z: number): void {
   hullGroup.add(tgt);
   lamp.target = tgt;
   hullGroup.add(lamp);
+
+  // the hot bulb itself — a small emissive core the bloom can catch
+  const bulb = new THREE.Mesh(
+    new THREE.SphereGeometry(0.065, 10, 10),
+    new THREE.MeshBasicMaterial({ color: 0xeaffff }),
+  );
+  bulb.position.set(2.72, y, z);
+  hullGroup.add(bulb);
 
   const cone = new THREE.Mesh(new THREE.ConeGeometry(1.7, 9, 24, 1, true), makeBeamMaterial());
   // apex at the lamp, opening forward-down along the beam direction
@@ -238,7 +250,8 @@ function floodlight(y: number, z: number): void {
       depthWrite: false,
     }),
   );
-  halo.scale.setScalar(0.9);
+  halo.scale.setScalar(1.2);
+  (halo.material as THREE.SpriteMaterial).opacity = 0.55;
   halo.position.copy(lamp.position).addScaledVector(dir, 0.25);
   hullGroup.add(halo);
 }
@@ -566,6 +579,29 @@ for (let i = 0; i < 3; i++) {
 let clawClosed = false;
 let clawT = 0;
 
+// claw work light: a small warm lamp on the wrist, lighting whatever the
+// claw is reaching for — plus the claw cam that feeds the PiP viewport
+const clawLamp = new THREE.SpotLight(0xffe2b8, 90, 10, 0.62, 0.6, 1.6);
+clawLamp.position.set(0, 0.1, 0.05);
+const clawLampTarget = new THREE.Object3D();
+clawLampTarget.position.set(0, 0, 3);
+claw.add(clawLampTarget);
+clawLamp.target = clawLampTarget;
+claw.add(clawLamp);
+const clawBulb = new THREE.Mesh(
+  new THREE.SphereGeometry(0.018, 8, 8),
+  new THREE.MeshBasicMaterial({ color: 0xffedd0 }),
+);
+clawBulb.position.set(0, -0.09, 0.06); // under the wrist, out of the cam's eye
+claw.add(clawBulb);
+clawLamp.position.set(0, -0.09, 0.05);
+
+const clawCam = new THREE.PerspectiveCamera(62, 300 / 170, 0.05, 60);
+clawCam.position.set(0, 0.42, -1.0); // over-the-shoulder of the wrist
+clawCam.rotation.y = Math.PI; // camera looks down -Z; claw forward is +Z
+clawCam.rotation.x = -0.18; // tilted down toward the fingertips
+claw.add(clawCam);
+
 // target reticle
 const reticle = new THREE.Group();
 {
@@ -758,6 +794,8 @@ const THRUST = 14;
 const VTHRUST = 8;
 const TURN = 1.4;
 const DRAG = 0.55;
+let throttle = 0; // |thrust input|, drives prop spin + wake turbulence
+let propSpin = 0;
 
 // ------------------------------------------------------------------- post ---
 const composer = new EffectComposer(renderer);
@@ -790,10 +828,12 @@ const underwaterPass = new ShaderPass({
         cos(vUv.x * 30.0 + time * 0.95)
       ) * 0.0013;
       vec4 c = texture2D(tDiffuse, uv);
-      // water column grade: absorb red, lift the blue-greens in the darks
+      // water column grade: absorb red; contrast curve keeps the darks DARK
+      // (a flat blue lift here was washing the whole frame out)
       float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));
       c.rgb = mix(c.rgb, c.rgb * vec3(0.82, 1.0, 1.04), 0.4);
-      c.rgb += vec3(0.002, 0.010, 0.013) * (1.0 - lum);
+      c.rgb += vec3(0.001, 0.004, 0.006) * (1.0 - lum);
+      c.rgb = pow(max(c.rgb, 0.0), vec3(1.22)) * 1.16;
       // vignette
       float d = length((vUv - 0.5) * vec2(1.25, 1.0));
       float vig = smoothstep(1.0, 0.5, d);
@@ -844,6 +884,7 @@ function animate(): void {
       vert += pad.rt - pad.lt;
     }
   }
+  throttle = THREE.MathUtils.lerp(throttle, Math.min(1, Math.abs(thrust)), 1 - Math.exp(-5 * dt));
   sub.yawVel += turn * TURN * dt;
   sub.yawVel *= Math.exp(-2.2 * dt);
   sub.yaw += sub.yawVel * dt * 60 * 0.02;
@@ -870,7 +911,8 @@ function animate(): void {
     THREE.MathUtils.clamp(-sub.vel.y * 0.03, -0.2, 0.2) + Math.sin(t * 0.53 + 1) * 0.012,
     1 - Math.exp(-4 * dt),
   );
-  propGroup.rotation.x = t * (4 + sub.vel.length() * 2);
+  propSpin += dt * (1.5 + throttle * 22 + sub.vel.length() * 1.5);
+  propGroup.rotation.x = propSpin;
   (navLight.material as THREE.MeshBasicMaterial).color.setHex(
     t % 1.4 < 0.15 ? 0xff5040 : 0x3a1210, // anticollision beacon, dim red
   );
@@ -1015,24 +1057,38 @@ function animate(): void {
   }
   p.needsUpdate = true;
 
-  // --- thruster bubbles from the stern ---
-  for (const b of bubbles) {
-    b.userData.life += dt * 0.35;
+  // --- thruster wake: bubbles churned out with the throttle, tumbling in
+  // the prop wash before rising ---
+  for (let bi = 0; bi < bubbles.length; bi++) {
+    const b = bubbles[bi];
+    b.userData.life += dt * (0.25 + throttle * 1.3);
     if (b.userData.life > 1) {
-      b.userData.life = 0;
-      b.position
-        .copy(sub.pos)
-        .addScaledVector(forward, -3.2)
-        .add(
-          new THREE.Vector3(
-            (Math.random() - 0.5) * 0.4,
-            (Math.random() - 0.5) * 0.4,
-            (Math.random() - 0.5) * 0.4,
-          ),
-        );
+      // idle: a lazy seep. Under thrust: a full churn.
+      if (throttle > 0.05 || Math.random() < 0.25) {
+        b.userData.life = 0;
+        b.position
+          .copy(sub.pos)
+          .addScaledVector(forward, -3.2)
+          .add(
+            new THREE.Vector3(
+              (Math.random() - 0.5) * 0.4,
+              (Math.random() - 0.5) * 0.4,
+              (Math.random() - 0.5) * 0.4,
+            ),
+          );
+      } else {
+        b.userData.life = 1; // parked until next tick
+        (b.material as THREE.MeshBasicMaterial).opacity = 0;
+        continue;
+      }
     }
-    b.position.y += dt * (0.6 + b.userData.life);
-    (b.material as THREE.MeshBasicMaterial).opacity = 0.25 * (1 - b.userData.life);
+    const life = b.userData.life;
+    // pushed aft by the prop wash, swirling, then buoyancy takes over
+    b.position.addScaledVector(forward, -dt * throttle * 2.6 * (1 - life));
+    b.position.x += Math.sin(t * 9 + bi * 1.7) * dt * (0.15 + throttle * 0.8);
+    b.position.z += Math.cos(t * 8 + bi * 2.3) * dt * (0.15 + throttle * 0.8);
+    b.position.y += dt * (0.5 + life * (0.6 + throttle * 0.5));
+    (b.material as THREE.MeshBasicMaterial).opacity = (0.22 + throttle * 0.15) * (1 - life);
   }
 
   // beam + caustics + water-wobble animation
@@ -1047,6 +1103,21 @@ function animate(): void {
   headEl.textContent = String(Math.round(heading)).padStart(3, "0") + "°";
 
   composer.render();
+
+  // --- claw cam PiP: raw second render into a scissored viewport that sits
+  // behind the HUD's MANIP CAM frame (bottom-left) ---
+  {
+    const pw = 300;
+    const ph = 170;
+    const px = 14;
+    const py = 96;
+    renderer.setScissorTest(true);
+    renderer.setViewport(px, py, pw, ph);
+    renderer.setScissor(px, py, pw, ph);
+    renderer.render(scene, clawCam);
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+  }
 }
 animate();
 
