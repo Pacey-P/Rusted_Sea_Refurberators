@@ -727,9 +727,9 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     if (!e.repeat) tabDownAt = performance.now();
   }
-  if (e.code === "Space" && mode === "MANIPULATOR") {
+  if (e.code === "Space") {
     e.preventDefault();
-    toggleClaw();
+    if (!e.repeat) toggleClaw();
   }
 });
 window.addEventListener("keyup", (e) => {
@@ -750,12 +750,18 @@ const mouse = new THREE.Vector2(0, 0);
 const raycaster = new THREE.Raycaster();
 const targetPlane = new THREE.Plane();
 
+let pointerDownAt = 0;
 renderer.domElement.addEventListener("pointerdown", () => {
   dragging = true;
   dragMoved = 0;
+  pointerDownAt = performance.now();
 });
 window.addEventListener("pointerup", () => {
-  if (dragging && dragMoved < 6 && mode === "MANIPULATOR") toggleClaw();
+  // left click = grip toggle, in either mode. Generous discrimination:
+  // a short press counts as a click even with a little hand jitter —
+  // only a real drag (moved far AND held long) is treated as camera orbit.
+  const quick = performance.now() - pointerDownAt < 220;
+  if (dragging && (dragMoved < 12 || quick)) toggleClaw();
   dragging = false;
 });
 let mouseDirty = false; // only steer the arm when the mouse actually moved
@@ -980,7 +986,7 @@ function animate(): void {
       padYTime = 0;
     } else padYTime = 0;
     padYWas = yNow;
-    if (pad.pressed(0) && mode === "MANIPULATOR") toggleClaw(); // A
+    if (pad.pressed(0)) toggleClaw(); // A — grip, in either mode
     orbitYaw -= pad.rx * 2.2 * dt;
     orbitPitch = THREE.MathUtils.clamp(orbitPitch + pad.ry * 1.5 * dt, -0.5, 0.9);
   }
