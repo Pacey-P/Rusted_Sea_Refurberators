@@ -36,7 +36,7 @@ document.body.appendChild(renderer.domElement);
 const WATER = new THREE.Color("#03121c");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#020a12");
-scene.fog = new THREE.FogExp2(WATER, 0.05);
+scene.fog = new THREE.FogExp2(WATER, 0.072);
 
 const camera = new THREE.PerspectiveCamera(
   55,
@@ -100,17 +100,17 @@ let navLight: THREE.Mesh;
   tail.scale.x = 1.9;
   hullGroup.add(tail);
 
-  // sail / conning tower
+  // sail / conning tower — elongated along the hull's long axis (+X here)
   const sail = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.44, 0.9, 18), panelMat));
-  sail.scale.z = 2.1;
+  sail.scale.x = 2.1;
   sail.position.set(0.5, 1.05, 0);
   hullGroup.add(sail);
   const mast = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.5, 8), trimMat));
   mast.position.set(0.6, 1.7, 0);
   hullGroup.add(mast);
   navLight = new THREE.Mesh(
-    new THREE.SphereGeometry(0.05, 8, 8),
-    new THREE.MeshBasicMaterial({ color: 0x38e0a0 }),
+    new THREE.SphereGeometry(0.04, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0x8a1610 }),
   );
   navLight.position.set(0.6, 1.98, 0);
   hullGroup.add(navLight);
@@ -147,8 +147,64 @@ let navLight: THREE.Mesh;
   hullGroup.add(propGroup);
 }
 
-// floodlights + visible beams (r170: spot intensity is candela now)
-const beams: THREE.Mesh[] = [];
+// floodlights + visible beams (r170: spot intensity is candela now).
+// Beams are shader cones: brightness fades along the length AND at the
+// grazing rim, with a slow shimmer — light scattering through water, not
+// crisp geometry.
+const beamMats: THREE.ShaderMaterial[] = [];
+function makeBeamMaterial(): THREE.ShaderMaterial {
+  const mat = new THREE.ShaderMaterial({
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.BackSide,
+    uniforms: { time: { value: 0 } },
+    vertexShader: /* glsl */ `
+      varying float vAlong; // 0 at apex -> 1 at far end
+      varying vec3 vNormal;
+      varying vec3 vView;
+      void main() {
+        vAlong = 1.0 - uv.y;
+        vNormal = normalMatrix * normal;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vView = -mv.xyz;
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying float vAlong;
+      varying vec3 vNormal;
+      varying vec3 vView;
+      uniform float time;
+      void main() {
+        float facing = abs(dot(normalize(vNormal), normalize(vView)));
+        float body = smoothstep(0.0, 0.7, facing);
+        float fall = pow(1.0 - vAlong, 1.8);
+        // drifting murk inside the beam — light through particulate
+        float murk = 0.85 + 0.15 * sin(vAlong * 22.0 - time * 2.2)
+                          * sin(vAlong * 9.0 - time * 1.1);
+        float a = body * fall * murk * 0.10;
+        gl_FragColor = vec4(vec3(0.62, 0.85, 0.82) * a, a);
+      }
+    `,
+  });
+  beamMats.push(mat);
+  return mat;
+}
+function softDiscTexture(): THREE.CanvasTexture {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const g = c.getContext("2d")!;
+  const grad = g.createRadialGradient(64, 64, 2, 64, 64, 64);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.3, "rgba(255,255,255,0.45)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+const discTex = softDiscTexture();
+
 function floodlight(y: number, z: number): void {
   const housing = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.14, 0.2, 12), trimMat));
   housing.rotation.z = Math.PI / 2 - 0.35;
@@ -163,49 +219,49 @@ function floodlight(y: number, z: number): void {
   hullGroup.add(tgt);
   lamp.target = tgt;
   hullGroup.add(lamp);
-  const cone = new THREE.Mesh(
-    new THREE.ConeGeometry(1.7, 9, 24, 1, true),
-    new THREE.MeshBasicMaterial({
-      color: 0x9fd8cf,
-      transparent: true,
-      opacity: 0.028, // reference used .045 pre-bloom; our post stack amplifies
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    }),
-  );
-  // apex at the lamp, opening forward-down along the beam direction.
-  // (The reference negated the direction here, which flipped the visible
-  // cone 180° — up and backward. Cone axis tip->base is local -Y, so map
-  // -Y onto dir and push the center half a length along the beam.)
+
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(1.7, 9, 24, 1, true), makeBeamMaterial());
+  // apex at the lamp, opening forward-down along the beam direction
   const dir = new THREE.Vector3().subVectors(tgt.position, lamp.position).normalize();
   cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), dir);
   cone.position.copy(lamp.position).addScaledVector(dir, 4.5);
   hullGroup.add(cone);
-  beams.push(cone);
+
+  // scattering halo at the lamp itself — the "glow around a light in murk"
+  const halo = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: discTex,
+      color: 0xbfe9e2,
+      transparent: true,
+      opacity: 0.35,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+  halo.scale.setScalar(0.9);
+  halo.position.copy(lamp.position).addScaledVector(dir, 0.25);
+  hullGroup.add(halo);
 }
 floodlight(0.35, 0.45);
 floodlight(0.35, -0.45);
 
-// warm hull self-lighting: a soft amber wash from above the sail plus
-// port/starboard running lamps, so the hull reads as a 3D machine instead
-// of a flat silhouette. Kept dim — the dark is still the point.
+// warm hull self-lighting: a soft amber wash from above the sail plus a
+// pair of dim red service lamps sitting flush on the hull skin, so the
+// hull reads as a 3D machine instead of a silhouette. Red only — quiet.
 {
   const hullWarm = new THREE.PointLight(0xffb066, 6, 9, 1.8);
   hullWarm.position.set(0.4, 1.9, 0);
   hullGroup.add(hullWarm);
 
-  for (const [z, color] of [
-    [0.98, 0xff3b2e], // port (red)
-    [-0.98, 0x2eff7d], // starboard (green)
-  ] as const) {
+  // hull radius is .85: y=.32,z=±.78 puts the lamp on the skin, not floating
+  for (const z of [0.78, -0.78]) {
     const lampMesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.045, 8, 8),
-      new THREE.MeshBasicMaterial({ color }),
+      new THREE.SphereGeometry(0.035, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0xff3b2e }),
     );
     lampMesh.position.set(1.35, 0.32, z);
     hullGroup.add(lampMesh);
-    const glow = new THREE.PointLight(color, 1.6, 2.6, 1.8);
+    const glow = new THREE.PointLight(0xff3b2e, 0.9, 2.0, 1.8);
     glow.position.copy(lampMesh.position);
     hullGroup.add(glow);
   }
@@ -244,6 +300,48 @@ const floorY = -6.5;
   floor.receiveShadow = true;
   scene.add(floor);
 }
+// caustics: an additive overlay just above the sand — interfering wave
+// patterns crawling slowly, faded by distance so the fog stays in charge
+const causticsMat = new THREE.ShaderMaterial({
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  uniforms: {
+    time: { value: 0 },
+    camPos: { value: new THREE.Vector3() },
+  },
+  vertexShader: /* glsl */ `
+    varying vec3 vWorld;
+    void main() {
+      vec4 w = modelMatrix * vec4(position, 1.0);
+      vWorld = w.xyz;
+      gl_Position = projectionMatrix * viewMatrix * w;
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    varying vec3 vWorld;
+    uniform float time;
+    uniform vec3 camPos;
+    void main() {
+      vec2 p = vWorld.xz;
+      float t = time;
+      float c1 = sin(p.x * 0.85 + t * 0.55) * sin(p.y * 1.05 - t * 0.47);
+      float c2 = sin((p.x + p.y) * 0.6 + t * 0.7) * sin((p.x - p.y) * 0.52 - t * 0.33);
+      float c3 = sin(p.x * 1.7 - t * 0.9) * sin(p.y * 1.5 + t * 0.6);
+      float ca = pow(abs(c1 * 0.5 + c2 * 0.35 + c3 * 0.15), 3.0);
+      float fade = exp(-distance(camPos, vWorld) * 0.055);
+      float a = ca * fade * 0.22;
+      gl_FragColor = vec4(vec3(0.35, 0.75, 0.72) * a, a);
+    }
+  `,
+});
+{
+  const overlay = new THREE.Mesh(new THREE.PlaneGeometry(300, 300, 1, 1), causticsMat);
+  overlay.rotation.x = -Math.PI / 2;
+  overlay.position.y = floorY + 1.9; // rides just above the dune crests
+  scene.add(overlay);
+}
+
 // rocks
 {
   const rockMat = new THREE.MeshStandardMaterial({ color: 0x0c1d26, roughness: 1 });
@@ -572,9 +670,11 @@ window.addEventListener("pointerup", () => {
   if (dragging && dragMoved < 6 && mode === "MANIPULATOR") toggleClaw();
   dragging = false;
 });
+let mouseDirty = false; // only steer the arm when the mouse actually moved
 window.addEventListener("pointermove", (e) => {
   mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  mouseDirty = true;
   if (dragging) {
     dragMoved += Math.abs(e.movementX) + Math.abs(e.movementY);
     orbitYaw -= e.movementX * 0.004;
@@ -630,6 +730,16 @@ function toggleMode(): void {
   modeEl.textContent = mode;
   hintPilot.style.display = mode === "PILOT" ? "" : "none";
   hintManip.style.display = mode === "MANIPULATOR" ? "" : "none";
+  if (mode === "MANIPULATOR") {
+    // start the arm at a natural work position ahead of and below the bow,
+    // not wherever a stale target happens to be
+    forward.set(Math.sin(sub.yaw), 0, Math.cos(sub.yaw));
+    armTarget
+      .copy(sub.pos)
+      .addScaledVector(forward, 2.4)
+      .add(new THREE.Vector3(0, -1.6, 0));
+    mouseDirty = false;
+  }
 }
 function toggleClaw(): void {
   clawClosed = !clawClosed;
@@ -655,31 +765,45 @@ composer.addPass(new RenderPass(scene, camera));
 composer.addPass(
   new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.45, 0.6, 0.8),
 );
-composer.addPass(
-  new ShaderPass({
-    uniforms: { tDiffuse: { value: null }, strength: { value: 0.5 } },
-    vertexShader: /* glsl */ `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      varying vec2 vUv;
-      uniform sampler2D tDiffuse;
-      uniform float strength;
-      void main() {
-        vec4 c = texture2D(tDiffuse, vUv);
-        float d = length((vUv - 0.5) * vec2(1.25, 1.0));
-        float vig = smoothstep(1.0, 0.5, d);
-        c.rgb *= mix(1.0 - strength, 1.0, vig);
-        c.rgb = pow(max(c.rgb, 0.0), vec3(1.0 / 2.2));
-        gl_FragColor = c;
-      }
-    `,
-  }),
-);
+const underwaterPass = new ShaderPass({
+  uniforms: {
+    tDiffuse: { value: null },
+    strength: { value: 0.5 },
+    time: { value: 0 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    varying vec2 vUv;
+    uniform sampler2D tDiffuse;
+    uniform float strength;
+    uniform float time;
+    void main() {
+      // gentle refraction wobble — we are looking THROUGH water
+      vec2 uv = vUv + vec2(
+        sin(vUv.y * 34.0 + time * 1.15),
+        cos(vUv.x * 30.0 + time * 0.95)
+      ) * 0.0013;
+      vec4 c = texture2D(tDiffuse, uv);
+      // water column grade: absorb red, lift the blue-greens in the darks
+      float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+      c.rgb = mix(c.rgb, c.rgb * vec3(0.82, 1.0, 1.04), 0.4);
+      c.rgb += vec3(0.002, 0.010, 0.013) * (1.0 - lum);
+      // vignette
+      float d = length((vUv - 0.5) * vec2(1.25, 1.0));
+      float vig = smoothstep(1.0, 0.5, d);
+      c.rgb *= mix(1.0 - strength, 1.0, vig);
+      c.rgb = pow(max(c.rgb, 0.0), vec3(1.0 / 2.2));
+      gl_FragColor = c;
+    }
+  `,
+});
+composer.addPass(underwaterPass);
 
 // ------------------------------------------------------------------- loop ---
 const clock = new THREE.Clock();
@@ -748,7 +872,7 @@ function animate(): void {
   );
   propGroup.rotation.x = t * (4 + sub.vel.length() * 2);
   (navLight.material as THREE.MeshBasicMaterial).color.setHex(
-    t % 1.4 < 0.15 ? 0x9dffd4 : 0x123c2c,
+    t % 1.4 < 0.15 ? 0xff5040 : 0x3a1210, // anticollision beacon, dim red
   );
 
   // --- beacon blink ---
@@ -803,26 +927,37 @@ function animate(): void {
 
   // --- arm target ---
   if (mode === "MANIPULATOR") {
-    // mouse: camera-facing plane through a point ahead of and below the bow
-    camera.getWorldDirection(camWorldDir);
-    targetPlane.setFromNormalAndCoplanarPoint(
-      camWorldDir,
-      sub.pos.clone().addScaledVector(forward, 2.2).add(new THREE.Vector3(0, -1, 0)),
-    );
-    raycaster.setFromCamera(mouse, camera);
-    const hit = new THREE.Vector3();
-    if (raycaster.ray.intersectPlane(targetPlane, hit)) {
-      hit.y = Math.max(hit.y, floorY + 0.55);
-      armTarget.copy(hit);
+    // Mouse steers only when it moves — otherwise the per-frame raycast
+    // would clobber gamepad input, which is what made the pad unusable.
+    if (mouseDirty) {
+      mouseDirty = false;
+      camera.getWorldDirection(camWorldDir);
+      targetPlane.setFromNormalAndCoplanarPoint(
+        camWorldDir,
+        sub.pos.clone().addScaledVector(forward, 2.2).add(new THREE.Vector3(0, -1, 0)),
+      );
+      raycaster.setFromCamera(mouse, camera);
+      const hit = new THREE.Vector3();
+      if (raycaster.ray.intersectPlane(targetPlane, hit)) {
+        hit.y = Math.max(hit.y, floorY + 0.55);
+        armTarget.copy(hit);
+      }
     }
-    // gamepad left stick nudges the target in the camera plane
-    if (pad && (pad.lx !== 0 || pad.ly !== 0)) {
-      camRight.setFromMatrixColumn(camera.matrix, 0);
-      camUp.setFromMatrixColumn(camera.matrix, 1);
-      armTarget.addScaledVector(camRight, pad.lx * 3.2 * dt);
-      armTarget.addScaledVector(camUp, -pad.ly * 3.2 * dt);
-      armTarget.y = Math.max(armTarget.y, floorY + 0.55);
+    // Gamepad: sub-relative "work table" — left stick slides the target
+    // laterally/fore-aft in the horizontal plane, triggers raise/lower it.
+    if (pad) {
+      const rightVec = new THREE.Vector3(Math.cos(sub.yaw), 0, -Math.sin(sub.yaw));
+      armTarget.addScaledVector(rightVec, pad.lx * 3.4 * dt);
+      armTarget.addScaledVector(forward, -pad.ly * 3.4 * dt);
+      armTarget.y += (pad.rt - pad.lt) * 2.6 * dt;
     }
+    // keep the target sane: reachable-ish sphere around the shoulder, above sand
+    mount.getWorldPosition(baseWorld);
+    const off = armTarget.clone().sub(baseWorld);
+    if (off.length() > TOTAL * 1.15) {
+      armTarget.copy(baseWorld).addScaledVector(off.normalize(), TOTAL * 1.15);
+    }
+    armTarget.y = Math.max(armTarget.y, floorY + 0.55);
   } else {
     // PILOT: arm folds in under the bow
     mount.getWorldPosition(baseWorld);
@@ -900,11 +1035,11 @@ function animate(): void {
     (b.material as THREE.MeshBasicMaterial).opacity = 0.25 * (1 - b.userData.life);
   }
 
-  // beam shimmer
-  for (const c of beams) {
-    (c.material as THREE.MeshBasicMaterial).opacity =
-      0.026 + Math.sin(t * 7 + c.position.z) * 0.006;
-  }
+  // beam + caustics + water-wobble animation
+  for (const m of beamMats) m.uniforms.time.value = t;
+  causticsMat.uniforms.time.value = t;
+  causticsMat.uniforms.camPos.value.copy(camera.position);
+  underwaterPass.uniforms.time.value = t;
 
   // --- HUD readouts (real values from the sim now) ---
   depthEl.textContent = (312.4 - sub.pos.y * 1.8).toFixed(1) + " M";
