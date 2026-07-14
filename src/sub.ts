@@ -1284,25 +1284,38 @@ function animate(): void {
   }
   smoothedTarget.lerp(armTarget, 1 - Math.exp(-8 * dt));
 
-  // --- claw collision: the claw cannot enter rocks or the crate. Its IK
-  // goal is projected back to the surface, and the denied motion becomes a
-  // shove — so driving the claw into an object pushes it along the sand. ---
-  const shove = (center: THREE.Vector3, radius: number, outVel: THREE.Vector3): void => {
-    const minD = radius + CLAW_R;
-    const d = smoothedTarget.distanceTo(center);
-    if (d >= minD) return;
-    const dir = smoothedTarget.clone().sub(center);
-    if (dir.lengthSq() < 1e-8) dir.set(0, 1, 0);
-    dir.normalize();
-    const pen = minD - d;
-    smoothedTarget.copy(center).addScaledVector(dir, minD); // claw rides the surface
-    dir.y = 0; // objects slide, they don't fly
-    if (dir.lengthSq() > 1e-8) {
-      outVel.addScaledVector(dir.normalize(), -pen * 55 * dt * 60 * 0.02);
+  // --- claw collision: the claw cannot push INTO rocks or the crate from
+  // the side. Cylinder constraint (not sphere): the goal is projected out
+  // horizontally, which both prevents the "surf up over the pole and point
+  // at the sky" failure and makes the shove direction naturally lateral.
+  // Approaching from above stays free so top-grabs work. ---
+  const shove = (center: THREE.Vector3, radius: number, top: number, outVel: THREE.Vector3): void => {
+    if (smoothedTarget.y > center.y + top) return; // above it: no contact
+    const minR = radius + CLAW_R;
+    const dx = smoothedTarget.x - center.x;
+    const dz = smoothedTarget.z - center.z;
+    const horiz = Math.hypot(dx, dz);
+    if (horiz >= minR) return;
+    // degenerate (directly inside the axis): push toward the sub — stable
+    let nx: number;
+    let nz: number;
+    if (horiz < 1e-4) {
+      const toSub = sub.pos.clone().sub(center);
+      const l = Math.hypot(toSub.x, toSub.z) || 1;
+      nx = toSub.x / l;
+      nz = toSub.z / l;
+    } else {
+      nx = dx / horiz;
+      nz = dz / horiz;
     }
+    const pen = minR - horiz;
+    smoothedTarget.x = center.x + nx * minR; // claw rides the flank
+    smoothedTarget.z = center.z + nz * minR;
+    outVel.x += -nx * pen * 66 * dt;
+    outVel.z += -nz * pen * 66 * dt;
   };
-  for (const rock of rocks) shove(rock.m.position, rock.r, rock.vel);
-  if (!carried) shove(crate.position, CRATE_R, crateVelH);
+  for (const rock of rocks) shove(rock.m.position, rock.r, rock.r * 0.7, rock.vel);
+  if (!carried) shove(crate.position, CRATE_R, 0.6, crateVelH);
 
   mount.getWorldPosition(baseWorld);
   solveIK(baseWorld);
