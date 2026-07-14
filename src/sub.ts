@@ -269,6 +269,26 @@ function floodlight(y: number, z: number): void {
 floodlight(0.35, 0.45);
 floodlight(0.35, -0.45);
 
+// landing skids — helicopter-style rails so she can set down on the bottom.
+// Kept aft of the arm's workspace (shoulder is at x=1.9).
+{
+  for (const side of [-1, 1]) {
+    const rail = addShadow(new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 3.2, 4, 8), trimMat));
+    rail.rotation.z = Math.PI / 2; // capsule axis onto X
+    rail.position.set(-0.4, -1.32, side * 0.72);
+    hullGroup.add(rail);
+    // slightly splayed struts, two per rail
+    for (const sx of [-1.7, 0.9]) {
+      const strut = addShadow(
+        new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.8, 8), trimMat),
+      );
+      strut.position.set(sx, -0.92, side * 0.62);
+      strut.rotation.x = side * 0.22;
+      hullGroup.add(strut);
+    }
+  }
+}
+
 // warm hull self-lighting: a soft amber wash from above the sail plus a
 // pair of dim red service lamps sitting flush on the hull skin, so the
 // hull reads as a 3D machine instead of a silhouette. Red only — quiet.
@@ -378,19 +398,26 @@ const causticsMat = new THREE.ShaderMaterial({
   scene.add(overlay);
 }
 
-// rocks
+// rocks — pushable: the claw (and the hull) can nudge them around
+type Rock = { m: THREE.Mesh; r: number; rest: number; vel: THREE.Vector3 };
+const rocks: Rock[] = [];
 {
   const rockMat = new THREE.MeshStandardMaterial({ color: 0x0c1d26, roughness: 1 });
   for (let i = 0; i < 26; i++) {
-    const r = addShadow(
-      new THREE.Mesh(new THREE.DodecahedronGeometry(0.4 + Math.random() * 1.6, 0), rockMat),
-    );
+    const geoR = 0.4 + Math.random() * 1.6;
+    const r = addShadow(new THREE.Mesh(new THREE.DodecahedronGeometry(geoR, 0), rockMat));
     const a = Math.random() * Math.PI * 2;
     const d = 6 + Math.random() * 45;
     r.position.set(Math.cos(a) * d, floorY + 0.3 + Math.random() * 0.4, Math.sin(a) * d);
     r.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
     r.scale.y = 0.5 + Math.random() * 0.5;
     scene.add(r);
+    rocks.push({
+      m: r,
+      r: geoR * 0.85,
+      rest: r.position.y - floorHeightAt(r.position.x, r.position.z),
+      vel: new THREE.Vector3(),
+    });
   }
 }
 
@@ -668,15 +695,19 @@ function solveIK(base: THREE.Vector3): void {
   if (d > TOTAL * 0.995) {
     t.copy(base).addScaledVector(t.sub(base).normalize(), TOTAL * 0.995);
   }
+  // degenerate-direction guard: normalize(0,0,0) is NaN, and one NaN joint
+  // makes the whole arm vanish
+  const safeDir = (v: THREE.Vector3): THREE.Vector3 =>
+    v.lengthSq() < 1e-10 ? v.set(0, -1, 0) : v.normalize();
   for (let it = 0; it < 10; it++) {
     joints[N].copy(t);
     for (let i = N - 1; i >= 0; i--) {
-      const dir = joints[i].clone().sub(joints[i + 1]).normalize();
+      const dir = safeDir(joints[i].clone().sub(joints[i + 1]));
       joints[i].copy(joints[i + 1]).addScaledVector(dir, LENGTHS[i]);
     }
     joints[0].copy(base);
     for (let i = 1; i <= N; i++) {
-      const dir = joints[i].clone().sub(joints[i - 1]).normalize();
+      const dir = safeDir(joints[i].clone().sub(joints[i - 1]));
       joints[i].copy(joints[i - 1]).addScaledVector(dir, LENGTHS[i - 1]);
     }
     if (joints[N].distanceTo(t) < 0.002) break;
@@ -1038,7 +1069,12 @@ function animate(): void {
   sub.vel.multiplyScalar(Math.exp(-DRAG * dt));
   sub.pos.addScaledVector(sub.vel, dt);
   sub.pos.y = Math.min(sub.pos.y, 8);
-  sub.pos.y = Math.max(sub.pos.y, floorY + 2.2);
+  // set down on the skids: minimum altitude follows the actual terrain
+  const ground = floorHeightAt(sub.pos.x, sub.pos.z) + 1.45;
+  if (sub.pos.y <= ground) {
+    sub.pos.y = ground;
+    sub.vel.y = Math.max(sub.vel.y, 0);
+  }
 
   // --- pose the sub ---
   subGroup.position.copy(sub.pos);
@@ -1077,6 +1113,43 @@ function animate(): void {
     (beacon.material as THREE.MeshBasicMaterial).color.setHex(blink ? 0xff5040 : 0x4a1712);
     beaconLight.color.setHex(0xff4030);
     beaconLight.intensity = blink ? 10 : 0;
+  }
+
+  // --- pushable rocks: the claw and the hull shoulder them aside ---
+  for (const rock of rocks) {
+    // claw contact
+    const dc = rock.m.position.distanceTo(claw.position);
+    const minC = rock.r + 0.4;
+    if (dc < minC) {
+      const dir = rock.m.position.clone().sub(claw.position);
+      dir.y = 0;
+      if (dir.lengthSq() > 1e-6) {
+        dir.normalize();
+        rock.vel.addScaledVector(dir, (minC - dc) * 10 * dt * 60 * 0.15);
+      }
+    }
+    // hull contact (broad sphere around the sub)
+    const dh = rock.m.position.distanceTo(sub.pos);
+    const minH = rock.r + 1.7;
+    if (dh < minH) {
+      const dir = rock.m.position.clone().sub(sub.pos);
+      dir.y = 0;
+      if (dir.lengthSq() > 1e-6) {
+        dir.normalize();
+        rock.vel.addScaledVector(dir, (minH - dh) * 6 * dt * 60 * 0.15);
+        // pushing mass slows the boat a touch
+        sub.vel.multiplyScalar(1 - 0.4 * dt);
+      }
+    }
+    // integrate: friction slide, tumble with speed, hug the terrain
+    if (rock.vel.lengthSq() > 1e-6) {
+      rock.vel.multiplyScalar(Math.exp(-2.4 * dt));
+      rock.m.position.addScaledVector(rock.vel, dt);
+      rock.m.position.y = floorHeightAt(rock.m.position.x, rock.m.position.z) + rock.rest;
+      const spd = rock.vel.length();
+      rock.m.rotation.y += spd * 0.3 * dt;
+      rock.m.rotation.x += spd * 0.5 * dt;
+    }
   }
 
   // --- dropped crate sinks and settles into the sand ---
