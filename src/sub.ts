@@ -65,8 +65,9 @@ loader.load("assets/models/sea_major.glb", (gltf) => {
 
   // bbox is nearly square (antennas/tail pipe) — orient the hull by eye:
   // profile runs along X in the glb with the tail toward +X, so -90° puts
-  // the bow on +Z (our forward)
-  model.rotation.y = -Math.PI / 2;
+  // the bow on +Z (our forward). The extra correction cancels a few degrees
+  // of yaw baked into the model, which read as "veering" under thrust.
+  model.rotation.y = -Math.PI / 2 - 0.12;
   const long = Math.max(size.x, size.z);
   model.scale.setScalar(9 / long); // player sub ~9 units long
   subGroup.add(model);
@@ -81,22 +82,32 @@ const beamMat = new THREE.ShaderMaterial({
   transparent: true,
   blending: THREE.AdditiveBlending,
   depthWrite: false,
-  side: THREE.DoubleSide,
+  side: THREE.BackSide, // render the far inside wall — softer silhouette
   uniforms: { time: { value: 0 } },
   vertexShader: /* glsl */ `
     varying float vAlong; // 0 at apex (nose) -> 1 at far end
+    varying vec3 vNormal;
+    varying vec3 vView;
     void main() {
       vAlong = 1.0 - uv.y;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      vNormal = normalMatrix * normal;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vView = -mv.xyz;
+      gl_Position = projectionMatrix * mv;
     }
   `,
   fragmentShader: /* glsl */ `
     varying float vAlong;
+    varying vec3 vNormal;
+    varying vec3 vView;
     uniform float time;
     void main() {
-      float fall = pow(1.0 - vAlong, 1.6);
-      float flicker = 0.95 + 0.05 * sin(time * 8.0);
-      float a = fall * 0.16 * flicker;
+      // soft radial edge: fade out where the view grazes the cone's rim
+      float facing = abs(dot(normalize(vNormal), normalize(vView)));
+      float body = smoothstep(0.0, 0.65, facing);
+      float fall = pow(1.0 - vAlong, 2.0);
+      float shimmer = 0.92 + 0.08 * sin(time * 6.0 + vAlong * 14.0);
+      float a = body * fall * 0.14 * shimmer;
       gl_FragColor = vec4(vec3(0.62, 0.82, 0.95) * a, a);
     }
   `,
@@ -111,6 +122,38 @@ beam.quaternion.setFromUnitVectors(
 );
 beam.position.set(0, 0.4, 3.6 + 11);
 subGroup.add(beam);
+
+// anchor the beam to a visible light source: a hot lamp glow at the nose
+function softDiscTexture(): THREE.CanvasTexture {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const g = c.getContext("2d")!;
+  const grad = g.createRadialGradient(64, 64, 2, 64, 64, 64);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.3, "rgba(255,255,255,0.5)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+const lampGlow = new THREE.Sprite(
+  new THREE.SpriteMaterial({
+    map: softDiscTexture(),
+    color: 0xd9edff,
+    transparent: true,
+    opacity: 0.9,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  }),
+);
+lampGlow.scale.setScalar(0.8);
+(lampGlow.material as THREE.SpriteMaterial).opacity = 0.55;
+lampGlow.position.set(0, 0.4, 4.4);
+subGroup.add(lampGlow);
+// and a small real light so the bow itself catches the lamp
+const noseLight = new THREE.PointLight(0xd9edff, 7, 7, 1.8);
+noseLight.position.set(0, 0.4, 3.4);
+subGroup.add(noseLight);
 
 // ------------------------------------------------------------- the wreck ---
 // A second Sea Major, dead on the seafloor — the salvage target.
@@ -185,49 +228,8 @@ const motes = new THREE.Points(
 );
 scene.add(motes);
 
-// ------------------------------------------------------- fish silhouettes ---
-function fishTexture(): THREE.CanvasTexture {
-  const c = document.createElement("canvas");
-  c.width = 64;
-  c.height = 32;
-  const g = c.getContext("2d")!;
-  g.fillStyle = "#050e13";
-  g.beginPath();
-  g.ellipse(38, 16, 18, 7, 0, 0, Math.PI * 2);
-  g.moveTo(22, 16);
-  g.lineTo(6, 6);
-  g.lineTo(6, 26);
-  g.closePath();
-  g.fill();
-  return new THREE.CanvasTexture(c);
-}
-type Fish = { mesh: THREE.Mesh; c: THREE.Vector3; r: number; sp: number; ph: number };
-const fishes: Fish[] = [];
-{
-  const mat = new THREE.MeshBasicMaterial({
-    map: fishTexture(),
-    transparent: true,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    fog: true,
-  });
-  const geo = new THREE.PlaneGeometry(2.2, 1.1);
-  for (let i = 0; i < 12; i++) {
-    const mesh = new THREE.Mesh(geo, mat);
-    fishes.push({
-      mesh,
-      c: new THREE.Vector3(
-        THREE.MathUtils.randFloatSpread(60),
-        THREE.MathUtils.randFloatSpread(20) - 4,
-        THREE.MathUtils.randFloat(30, 90),
-      ),
-      r: THREE.MathUtils.randFloat(6, 14),
-      sp: THREE.MathUtils.randFloat(0.08, 0.2),
-      ph: Math.random() * Math.PI * 2,
-    });
-    scene.add(mesh);
-  }
-}
+// (No wildlife yet — empty water is scarier than placeholder fish. Creatures
+// come back later done properly: Spine billboards or simple rigged meshes.)
 
 // ------------------------------------------------------------------ input ---
 const keys = new Set<string>();
@@ -374,18 +376,6 @@ function animate() {
     p.setXYZ(i, x, y, z);
   }
   p.needsUpdate = true;
-
-  // --- fish orbit their homes, face travel, always upright billboards ---
-  for (const f of fishes) {
-    const px = f.mesh.position.x;
-    f.mesh.position.set(
-      f.c.x + Math.cos(t * f.sp + f.ph) * f.r,
-      f.c.y + Math.sin(t * f.sp * 1.6 + f.ph) * 1.2,
-      f.c.z + Math.sin(t * f.sp + f.ph) * f.r,
-    );
-    f.mesh.lookAt(camera.position);
-    f.mesh.scale.x = f.mesh.position.x > px ? -1 : 1;
-  }
 
   composer.render();
 }
