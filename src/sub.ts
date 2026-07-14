@@ -1141,6 +1141,11 @@ function animate(): void {
         armTarget.copy(hit);
       }
     }
+    // Keyboard: W/S raise and lower the arm — the axis the mouse plane
+    // can't reach comfortably
+    const kbLift = (keys.has("KeyW") ? 1 : 0) - (keys.has("KeyS") ? 1 : 0);
+    armTarget.y += kbLift * 2.6 * dt;
+
     // Gamepad: sub-relative "work table" — left stick slides the target
     // laterally/fore-aft in the horizontal plane; d-pad up/down (or the
     // triggers) raise and lower it. Lateral sign flipped per playtest.
