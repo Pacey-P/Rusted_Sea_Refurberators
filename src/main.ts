@@ -23,10 +23,10 @@ const T = {
   godRayStrength: 0.85,
   warm: new THREE.Color("#ffb066"), // porthole / interior light
   lampCool: new THREE.Color("#cfe8ff"), // diver flashlight
-  bloom: { strength: 0.55, radius: 0.7, threshold: 0.72 },
-  diverPos: new THREE.Vector3(-5.2, 0.15, 0.4),
-  shellterPos: new THREE.Vector3(3.6, -0.9, 0),
-  shellterHeight: 5.2, // world units (meters-ish)
+  bloom: { strength: 0.4, radius: 0.55, threshold: 0.82 },
+  diverPos: new THREE.Vector3(-5.6, 0.3, 0.4),
+  shellterPos: new THREE.Vector3(3.9, -0.55, 0),
+  shellterHeight: 7.0, // world units (meters-ish)
 };
 
 // ----------------------------------------------------------------- setup ---
@@ -170,14 +170,67 @@ const lampTarget = new THREE.Object3D();
 scene.add(lamp, lampTarget);
 lamp.target = lampTarget;
 
-// ---------------------------------------------------------------- ground ---
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(80, 30),
-  new THREE.MeshStandardMaterial({ color: 0x1a2226, roughness: 1 }),
-);
-ground.rotation.x = -Math.PI / 2;
-ground.position.y = -3.4;
-scene.add(ground);
+// --------------------------------------------------------------- terrain ---
+// Real 3D seafloor: a displaced dune plane up close, two darker ridge layers
+// behind it, and scattered rock forms. Fog does the depth-grading for free.
+function noise2(x: number, z: number): number {
+  // cheap value-noise stand-in: layered sines with irrational frequencies
+  return (
+    Math.sin(x * 0.31 + z * 0.17) * 0.5 +
+    Math.sin(x * 0.113 - z * 0.271 + 1.7) * 0.85 +
+    Math.sin(x * 0.053 + z * 0.089 + 4.2) * 1.4
+  );
+}
+
+function makeSeafloor(
+  y: number,
+  amp: number,
+  color: number,
+  size: number,
+  segs: number,
+): THREE.Mesh {
+  const geo = new THREE.PlaneGeometry(size, size * 0.4, segs, Math.floor(segs * 0.4));
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    pos.setY(i, noise2(x, z) * amp);
+  }
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(
+    geo,
+    new THREE.MeshStandardMaterial({ color, roughness: 1, metalness: 0 }),
+  );
+  mesh.position.y = y;
+  return mesh;
+}
+
+const floorNear = makeSeafloor(-3.6, 0.55, 0x243139, 90, 96);
+scene.add(floorNear);
+const ridgeMid = makeSeafloor(-3.3, 1.0, 0x141f26, 120, 64);
+ridgeMid.position.z = -16;
+scene.add(ridgeMid);
+const ridgeFar = makeSeafloor(-3.0, 1.5, 0x0c151b, 160, 48);
+ridgeFar.position.z = -32;
+scene.add(ridgeFar);
+
+// scattered rocks along the near floor
+const rockGeo = new THREE.DodecahedronGeometry(1, 0);
+const rockMat = new THREE.MeshStandardMaterial({ color: 0x1c262d, roughness: 1 });
+for (let i = 0; i < 16; i++) {
+  const rock = new THREE.Mesh(rockGeo, rockMat);
+  const rx = THREE.MathUtils.randFloatSpread(44);
+  const rz = THREE.MathUtils.randFloat(-18, 2);
+  rock.position.set(rx, -3.55 + noise2(rx, rz) * 0.55, rz);
+  rock.scale.set(
+    THREE.MathUtils.randFloat(0.4, 1.6),
+    THREE.MathUtils.randFloat(0.25, 0.9),
+    THREE.MathUtils.randFloat(0.4, 1.4),
+  );
+  rock.rotation.y = Math.random() * Math.PI;
+  scene.add(rock);
+}
 
 // ------------------------------------------------------ volumetric cones ---
 // A flat "light wedge" quad: apex at the left edge, brightness falls off along
@@ -306,6 +359,7 @@ function toWorld(gx: number, gy: number, z: number): THREE.Vector3 {
 function addSprite(tex: string, pos: THREE.Vector3, s: number): void {
   texLoader.load(`assets/sprites/${tex}.png`, (map) => {
     map.colorSpace = THREE.SRGBColorSpace;
+    map.anisotropy = renderer.capabilities.getMaxAnisotropy();
     const w = map.image.width * s * PX;
     const h = map.image.height * s * PX;
     const mesh = new THREE.Mesh(
@@ -365,11 +419,11 @@ function onAssetsLoaded() {
   );
   console.log(
     "Spine animations:",
-    skeletonData.animations.map((a) => a.name),
+    JSON.stringify(skeletonData.animations.map((a) => a.name)),
   );
   console.log(
     "Spine skins:",
-    skeletonData.skins.map((s) => s.name),
+    JSON.stringify(skeletonData.skins.map((s) => s.name)),
   );
 
   skeletonMesh = new spine.SkeletonMesh({ skeletonData });
@@ -381,10 +435,15 @@ function onAssetsLoaded() {
     anims[0];
   skeletonMesh.state.setAnimation(0, swim, true);
 
+  // arms live in the weapon skins — "default" has none.
+  // The flashlight skin puts the beam in his hand, where it belongs.
+  skeletonMesh.skeleton.setSkinByName("weapons/onehanded_flashlight");
+  skeletonMesh.skeleton.setSlotsToSetupPose();
+
   // rig faces right by default — already headed home
   skeletonMesh.position.copy(T.diverPos);
   // cool depth tint so the unlit spine mesh sits in the dark scene
-  skeletonMesh.skeleton.color.set(0.52, 0.63, 0.71, 1);
+  skeletonMesh.skeleton.color.set(0.42, 0.53, 0.62, 1);
   scene.add(skeletonMesh);
 }
 
