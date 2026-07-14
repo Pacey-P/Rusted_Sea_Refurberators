@@ -12,7 +12,14 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as spine from "@esotericsoftware/spine-threejs";
+
+// Two ends of the game's visual grammar, same engine:
+//   default   — "the hearth": home waters, layered, warm, alive
+//   ?drop     — "the drop": deep theatre water; the world stripped away,
+//               one bubble of visibility, silhouettes at the beam's edge
+const DROP = new URLSearchParams(location.search).has("drop");
 
 // ---------------------------------------------------------------- tuning ---
 const T = {
@@ -40,7 +47,10 @@ renderer.toneMappingExposure = 1.3;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(T.fogColor, T.fogDensity);
+scene.fog = new THREE.FogExp2(
+  DROP ? new THREE.Color("#01060a") : T.fogColor,
+  DROP ? 0.085 : T.fogDensity,
+);
 const texLoader = new THREE.TextureLoader();
 
 const camera = new THREE.PerspectiveCamera(
@@ -83,7 +93,10 @@ const bgMat = new THREE.ShaderMaterial({
 });
 const bg = new THREE.Mesh(new THREE.PlaneGeometry(160, 90), bgMat);
 bg.position.set(0, 6, -45);
-scene.add(bg);
+if (!DROP) scene.add(bg);
+
+// drop mode: near-black water — the rest of "the drop" treatment is TBD
+if (DROP) scene.background = new THREE.Color("#010409");
 
 // -------------------------------------------------------------- god rays ---
 // One large additive quad; the shafts are computed in the fragment shader as
@@ -380,6 +393,22 @@ for (let i = 0; i < 4; i++) {
     i % 2 === 0,
   );
 }
+
+// ------------------------------------------- the C-Major, passing in the deep ---
+// Vehicles-in-3D test: the Sea Major base station (real .glb from the old 3D
+// prototype) crossing the far water as a fogged silhouette. Same lights, same
+// fog — 3D machines and 2D Spine characters sharing one world.
+let seaMajor: THREE.Group | null = null;
+new GLTFLoader().load("assets/models/sea_major.glb", (gltf) => {
+  seaMajor = gltf.scene;
+  const box = new THREE.Box3().setFromObject(seaMajor);
+  const size = box.getSize(new THREE.Vector3());
+  const s = 11 / size.x; // ~11 world units long — a big ship, not a whale
+  seaMajor.scale.setScalar(s);
+  seaMajor.position.set(-6, 2.0, -21);
+  seaMajor.rotation.y = Math.PI * 0.52; // beam-on to camera, nose left
+  scene.add(seaMajor);
+});
 
 // ------------------------------------------------------------ fish school ---
 function makeFishTexture(): THREE.CanvasTexture {
@@ -761,6 +790,9 @@ function animate() {
   rayMat.uniforms.time.value = t;
   for (const m of swayMats) m.uniforms.time.value = t;
   (distantBeam.material as THREE.ShaderMaterial).uniforms.time.value = t;
+
+  // the C-Major crawls across the deep, slow as weather
+  if (seaMajor) seaMajor.position.x = -6 + Math.sin(t * 0.045) * 10;
 
   // fish drift lazy ellipses; flip to face travel direction
   for (const f of fishes) {
