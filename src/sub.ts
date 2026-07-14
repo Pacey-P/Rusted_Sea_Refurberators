@@ -526,48 +526,240 @@ const rocks: Rock[] = [];
   }
 }
 
-// salvage crate with beacon
-const crate = new THREE.Group();
-let beacon: THREE.Mesh;
-let beaconLight: THREE.PointLight;
-{
-  const box = addShadow(
-    new THREE.Mesh(
-      new THREE.BoxGeometry(1.4, 0.9, 1.0),
-      new THREE.MeshStandardMaterial({ color: 0x223226, roughness: 0.9, metalness: 0.2 }),
-    ),
-  );
-  crate.add(box);
-  beacon = new THREE.Mesh(
+// ------------------------------------------- payloads: nuclear-era bombs ---
+// Old-school Fat-Man-style bombs, lost on the seafloor. Grab one, haul it
+// to the recovery pad, get paid. Each carries a locator beacon that
+// telegraphs the grab exactly like the crate used to.
+const nukeBody = new THREE.MeshStandardMaterial({ color: 0x4a4f38, roughness: 0.65, metalness: 0.45 });
+const nukeDark = new THREE.MeshStandardMaterial({ color: 0x22251c, roughness: 0.7, metalness: 0.4 });
+const nukeBand = new THREE.MeshStandardMaterial({ color: 0x9a8420, roughness: 0.6, metalness: 0.3 });
+
+type Payload = {
+  g: THREE.Group;
+  beacon: THREE.Mesh;
+  light: THREE.PointLight;
+  velH: THREE.Vector3;
+  velY: number;
+  falling: boolean;
+};
+const PAYLOAD_R = 0.75;
+const payloads: Payload[] = [];
+
+function makeNuke(x: number, z: number): Payload {
+  const g = new THREE.Group();
+  // fat ellipsoid body
+  const body = addShadow(new THREE.Mesh(new THREE.SphereGeometry(0.52, 18, 14), nukeBody));
+  body.scale.set(1.35, 1, 1);
+  g.add(body);
+  // hazard band
+  const band = new THREE.Mesh(new THREE.TorusGeometry(0.505, 0.035, 8, 24), nukeBand);
+  band.rotation.y = Math.PI / 2;
+  band.position.x = 0.18;
+  g.add(band);
+  // tail cone + ring + fins
+  const tail = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.42, 0.5, 12), nukeDark));
+  tail.rotation.z = Math.PI / 2;
+  tail.position.x = -0.82;
+  g.add(tail);
+  const ring = addShadow(new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.045, 8, 20), nukeDark));
+  ring.rotation.y = Math.PI / 2;
+  ring.position.x = -1.08;
+  g.add(ring);
+  for (let i = 0; i < 4; i++) {
+    const fin = addShadow(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.04, 0.34), nukeDark));
+    const holder = new THREE.Group();
+    fin.position.set(-0.92, 0.24, 0);
+    holder.add(fin);
+    holder.rotation.x = (i * Math.PI) / 2;
+    g.add(holder);
+  }
+  // locator beacon
+  const beacon = new THREE.Mesh(
     new THREE.SphereGeometry(0.07, 8, 8),
-    new THREE.MeshBasicMaterial({ color: 0xe0a458 }),
+    new THREE.MeshBasicMaterial({ color: 0xff5040 }),
   );
-  beacon.position.set(0.5, 0.52, 0.3);
-  crate.add(beacon);
-  beaconLight = new THREE.PointLight(0xe0a458, 0, 5, 1.8);
-  beaconLight.position.copy(beacon.position);
-  crate.add(beaconLight);
-  crate.position.set(2.6, floorHeightAt(2.6, 2.2) + 0.45, 2.2);
-  crate.rotation.y = 0.5;
-  scene.add(crate);
+  beacon.position.set(0.25, 0.5, 0);
+  g.add(beacon);
+  const light = new THREE.PointLight(0xff4030, 0, 5, 1.8);
+  light.position.copy(beacon.position);
+  g.add(light);
+
+  g.position.set(x, floorHeightAt(x, z) + 0.5, z);
+  g.rotation.y = Math.random() * Math.PI * 2;
+  scene.add(g);
+  const p: Payload = { g, beacon, light, velH: new THREE.Vector3(), velY: 0, falling: false };
+  payloads.push(p);
+  return p;
 }
+const siteCenter = new THREE.Vector2(2.6, 2.2);
+makeNuke(2.6, 2.2);
+makeNuke(9.5, -4.0);
+makeNuke(-6.0, 9.0);
+makeNuke(14.0, 10.5);
+
 // the op site's local ground level anchors the drone's patrol altitude
-const siteGroundY = floorHeightAt(2.6, 2.2);
+const siteGroundY = floorHeightAt(siteCenter.x, siteCenter.y);
+
+// ------------------------------------------------------- recovery drop-off ---
+// A lit pad with a beacon column. Release a bomb over it: +100 CR.
+const PAD_POS = new THREE.Vector3(-34, 0, -18);
+PAD_POS.y = floorHeightAt(PAD_POS.x, PAD_POS.z);
+const PAD_R = 3.6;
+{
+  const padMat = new THREE.MeshStandardMaterial({ color: 0x1c2429, roughness: 0.8, metalness: 0.4 });
+  const pad = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(PAD_R, PAD_R + 0.4, 0.5, 24), padMat));
+  pad.position.copy(PAD_POS).y += 0.25;
+  scene.add(pad);
+  const ringGlow = new THREE.Mesh(
+    new THREE.TorusGeometry(PAD_R - 0.25, 0.06, 8, 40),
+    new THREE.MeshBasicMaterial({ color: 0x37ff7a }),
+  );
+  ringGlow.rotation.x = Math.PI / 2;
+  ringGlow.position.copy(PAD_POS).y += 0.52;
+  scene.add(ringGlow);
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2;
+    const post = addShadow(new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 1.6, 8), padMat));
+    post.position.set(
+      PAD_POS.x + Math.cos(a) * (PAD_R - 0.1),
+      PAD_POS.y + 0.8,
+      PAD_POS.z + Math.sin(a) * (PAD_R - 0.1),
+    );
+    scene.add(post);
+    const tip = new THREE.Mesh(
+      new THREE.SphereGeometry(0.06, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0x37ff7a }),
+    );
+    tip.position.copy(post.position).y += 0.85;
+    scene.add(tip);
+  }
+  const padLight = new THREE.PointLight(0x37ff7a, 20, 14, 1.6);
+  padLight.position.copy(PAD_POS).y += 2.2;
+  scene.add(padLight);
+  // faint light column so the pad is findable at range
+  const col = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.5, 1.4, 34, 16, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: 0x37ff7a,
+      transparent: true,
+      opacity: 0.05,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  col.position.copy(PAD_POS).y += 17;
+  scene.add(col);
+}
+
+// ----------------------------------------------------- credits & torpedoes ---
+let credits = 0;
+function updateCreditsHud(): void {
+  document.getElementById("credits")!.textContent = `${credits} CR`;
+}
+type Torp = { m: THREE.Group; vel: THREE.Vector3; life: number };
+const torps: Torp[] = [];
+const torpMat = new THREE.MeshStandardMaterial({ color: 0x3c444c, roughness: 0.5, metalness: 0.6 });
+
+// transient explosion/flash effects
+type Fx = { s: THREE.Sprite; l: THREE.PointLight; age: number; grow: number };
+const fxs: Fx[] = [];
+function spawnFx(pos: THREE.Vector3, color: number, size: number, grow: number): void {
+  const s = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: discTex,
+      color,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+  s.scale.setScalar(size);
+  s.position.copy(pos);
+  const l = new THREE.PointLight(color, 120, 30, 1.6);
+  l.position.copy(pos);
+  scene.add(s, l);
+  fxs.push({ s, l, age: 0, grow });
+}
 
 // ------------------------------------------------------------- grab state ---
-const GRAB_RANGE = 1.35; // forgiving: claw within this of the crate can grip it
+const GRAB_RANGE = 1.45; // forgiving: claw within this of a bomb can grip it
 const CLAW_R = 0.34; // claw collision sphere
-const CRATE_R = 0.8; // crate collision sphere (approx)
-let carried: THREE.Group | null = null;
-let crateFalling = false;
-let crateVelY = 0;
-const crateVelH = new THREE.Vector3(); // horizontal slide when shoved
-const crateWorld = new THREE.Vector3();
+let carried: Payload | null = null;
+const payloadWorld = new THREE.Vector3();
 
+function nearestPayloadInRange(): Payload | null {
+  if (carried) return null;
+  let best: Payload | null = null;
+  let bestD = GRAB_RANGE;
+  for (const p of payloads) {
+    p.g.getWorldPosition(payloadWorld);
+    const d = claw.position.distanceTo(payloadWorld);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  return best;
+}
 function clawInGrabRange(): boolean {
-  if (carried) return false;
-  crate.getWorldPosition(crateWorld);
-  return claw.position.distanceTo(crateWorld) < GRAB_RANGE;
+  return nearestPayloadInRange() !== null;
+}
+
+// ---------------------------------------------------------- enemy base ---
+// A sentinel nest down in the trench. Three torpedoes crack it: +300 CR.
+const basePos = new THREE.Vector3(0, 0, -148);
+basePos.y = floorHeightAt(basePos.x, basePos.z);
+const baseGroup = new THREE.Group();
+let baseHp = 3;
+let baseEye: THREE.PointLight;
+{
+  const baseHullMat = new THREE.MeshStandardMaterial({ color: 0x2b2f27, roughness: 0.72, metalness: 0.5 });
+  const baseDarkMat = new THREE.MeshStandardMaterial({ color: 0x15181b, roughness: 0.55, metalness: 0.6 });
+  const dome = addShadow(
+    new THREE.Mesh(
+      new THREE.SphereGeometry(3.2, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2),
+      baseHullMat,
+    ),
+  );
+  baseGroup.add(dome);
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2;
+    const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.05, 2.6, 6), baseDarkMat);
+    ant.position.set(Math.cos(a) * 1.6, 2.6, Math.sin(a) * 1.6);
+    baseGroup.add(ant);
+    const tip = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0xff2418 }),
+    );
+    tip.position.copy(ant.position).y += 1.4;
+    baseGroup.add(tip);
+  }
+  const eye = new THREE.Mesh(
+    new THREE.SphereGeometry(0.5, 14, 14),
+    new THREE.MeshBasicMaterial({ color: 0xff2418 }),
+  );
+  eye.position.y = 2.9;
+  baseGroup.add(eye);
+  baseEye = new THREE.PointLight(0xff2418, 30, 24, 1.6);
+  baseEye.position.y = 3.2;
+  baseGroup.add(baseEye);
+  baseGroup.position.copy(basePos);
+  scene.add(baseGroup);
+}
+function hitBase(at: THREE.Vector3): void {
+  baseHp -= 1;
+  spawnFx(at, 0xffc060, 4, 14);
+  if (baseHp <= 0) {
+    spawnFx(baseGroup.position.clone().add(new THREE.Vector3(0, 2, 0)), 0xffd9a0, 10, 40);
+    baseGroup.visible = false;
+    credits += 300;
+    updateCreditsHud();
+    flashClawHud("BASE DESTROYED +300 CR");
+  } else {
+    flashClawHud(`BASE HIT · ${baseHp} TO GO`);
+  }
 }
 
 // distant wreck silhouette (Sea Major glb, half-buried set dressing)
@@ -690,7 +882,7 @@ const tentacles: { arm: THREE.Group; elbow: THREE.Group; s: number }[] = [];
     droneChassis.add(arm);
     tentacles.push({ arm, elbow, s });
   }
-  drone.position.set(crate.position.x + 4.6, siteGroundY + 3.3, crate.position.z);
+  drone.position.set(siteCenter.x + 4.6, siteGroundY + 3.3, siteCenter.y);
 }
 
 // -------------------------------------------------------- IK arm (FABRIK) ---
@@ -923,6 +1115,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     if (!e.repeat) toggleClaw();
   }
+  if (e.code === "KeyT" && !e.repeat) fireTorpedo();
 });
 window.addEventListener("keyup", (e) => {
   keys.delete(e.code);
@@ -1071,24 +1264,61 @@ function clawText(): string {
 }
 function toggleClaw(): void {
   clawClosed = !clawClosed;
-  if (clawClosed && clawInGrabRange()) {
-    // grip: the crate becomes part of the claw, world pose preserved
-    claw.attach(crate);
-    carried = crate;
-    crateFalling = false;
+  const grabbable = clawClosed ? nearestPayloadInRange() : null;
+  if (grabbable) {
+    // grip: the bomb becomes part of the claw, world pose preserved
+    claw.attach(grabbable.g);
+    carried = grabbable;
+    grabbable.falling = false;
     flashClawHud("PAYLOAD SECURED");
   } else if (!clawClosed && carried) {
     // release: back into the world, then gravity takes it
-    scene.attach(carried);
+    scene.attach(carried.g);
+    carried.falling = true;
+    carried.velY = 0;
     carried = null;
-    crateFalling = true;
-    crateVelY = 0;
     flashClawHud("PAYLOAD RELEASED");
   } else {
     clawFlashUntil = 0;
     clawHud.textContent = clawText();
   }
   clawHud.classList.toggle("closed", clawClosed);
+}
+
+function fireTorpedo(): void {
+  if (credits < 50) {
+    flashClawHud("TORPEDO: NEED 50 CR");
+    return;
+  }
+  credits -= 50;
+  updateCreditsHud();
+  const m = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.7, 10), torpMat);
+  body.rotation.x = Math.PI / 2;
+  m.add(body);
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 10), torpMat);
+  nose.rotation.x = Math.PI / 2;
+  nose.position.z = 0.46;
+  m.add(nose);
+  const glow = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: discTex,
+      color: 0xffd9a0,
+      transparent: true,
+      opacity: 0.5,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+  glow.scale.setScalar(0.5);
+  glow.position.z = -0.4;
+  m.add(glow);
+  forward.set(Math.sin(sub.yaw), 0, Math.cos(sub.yaw));
+  m.position.copy(sub.pos).addScaledVector(forward, 3.6).add(new THREE.Vector3(0, -0.25, 0));
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), forward);
+  scene.add(m);
+  torps.push({ m, vel: forward.clone().multiplyScalar(26), life: 7 });
+  flashClawHud("TORPEDO AWAY −50 CR");
 }
 
 // ---------------------------------------------------------------- physics ---
@@ -1192,6 +1422,7 @@ function animate(): void {
     }
     padYWas = yNow;
     if (pad.pressed(0)) toggleClaw(); // A — grip, in either mode
+    if (pad.pressed(2)) fireTorpedo(); // X — torpedo
     // bumpers step the floods in 25% notches: LB dims, RB brightens
     if (pad.pressed(4)) {
       floodLevel = Math.max(0, floodLevel - 0.25);
@@ -1263,23 +1494,26 @@ function animate(): void {
     t % 1.4 < 0.15 ? 0xff5040 : 0x3a1210, // anticollision beacon, dim red
   );
 
-  // --- beacon: red blink normally; GREEN when the claw is in grab range;
-  // steady soft green while carried ---
-  const inRange = clawInGrabRange();
-  if (carried) {
-    (beacon.material as THREE.MeshBasicMaterial).color.setHex(0x1f8a4a);
-    beaconLight.color.setHex(0x35ff70);
-    beaconLight.intensity = 2.5;
-  } else if (inRange) {
-    const gblink = t % 0.35 < 0.2; // eager fast green: "you can take it"
-    (beacon.material as THREE.MeshBasicMaterial).color.setHex(gblink ? 0x4dff85 : 0x134a26);
-    beaconLight.color.setHex(0x35ff70);
-    beaconLight.intensity = gblink ? 12 : 2;
-  } else {
-    const blink = t % 1.1 < 0.12;
-    (beacon.material as THREE.MeshBasicMaterial).color.setHex(blink ? 0xff5040 : 0x4a1712);
-    beaconLight.color.setHex(0xff4030);
-    beaconLight.intensity = blink ? 10 : 0;
+  // --- beacons: red blink normally; GREEN on the bomb the claw can take;
+  // steady soft green on the one being carried ---
+  const inRangeP = nearestPayloadInRange();
+  for (const p of payloads) {
+    const mat = p.beacon.material as THREE.MeshBasicMaterial;
+    if (p === carried) {
+      mat.color.setHex(0x1f8a4a);
+      p.light.color.setHex(0x35ff70);
+      p.light.intensity = 2.5;
+    } else if (p === inRangeP) {
+      const gblink = t % 0.35 < 0.2; // eager fast green: "you can take it"
+      mat.color.setHex(gblink ? 0x4dff85 : 0x134a26);
+      p.light.color.setHex(0x35ff70);
+      p.light.intensity = gblink ? 12 : 2;
+    } else {
+      const blink = (t + p.g.id * 0.13) % 1.1 < 0.12;
+      mat.color.setHex(blink ? 0xff5040 : 0x4a1712);
+      p.light.color.setHex(0xff4030);
+      p.light.intensity = blink ? 10 : 0;
+    }
   }
 
   // --- pushable rocks: hull contact shoves them; claw contact is handled
@@ -1308,57 +1542,105 @@ function animate(): void {
     }
   }
 
-  // --- crate slides when shoved (by claw constraint or hull), hugging the
-  // sand; vertical handled by the sink logic below ---
-  if (!carried) {
-    const dhc = crate.position.distanceTo(sub.pos);
-    const minHC = CRATE_R + 1.7;
+  // --- free bombs: hull shoves, friction slide, sink after release; a bomb
+  // settling on the recovery pad is a delivery ---
+  for (const p of payloads) {
+    if (p === carried) continue;
+    const pos = p.g.position;
+    const dhc = pos.distanceTo(sub.pos);
+    const minHC = PAYLOAD_R + 1.7;
     if (dhc < minHC) {
-      const dir = crate.position.clone().sub(sub.pos);
+      const dir = pos.clone().sub(sub.pos);
       dir.y = 0;
       if (dir.lengthSq() > 1e-6) {
         dir.normalize();
-        crateVelH.addScaledVector(dir, (minHC - dhc) * 6 * dt * 60 * 0.15);
+        p.velH.addScaledVector(dir, (minHC - dhc) * 6 * dt * 60 * 0.15);
       }
     }
-    if (crateVelH.lengthSq() > 1e-6) {
-      crateVelH.multiplyScalar(Math.exp(-2.4 * dt));
-      crate.position.x += crateVelH.x * dt;
-      crate.position.z += crateVelH.z * dt;
-      crate.rotation.y += crateVelH.length() * 0.12 * dt;
-      if (!crateFalling) {
-        crate.position.y = floorHeightAt(crate.position.x, crate.position.z) + 0.45;
+    if (p.velH.lengthSq() > 1e-6) {
+      p.velH.multiplyScalar(Math.exp(-2.4 * dt));
+      pos.x += p.velH.x * dt;
+      pos.z += p.velH.z * dt;
+      p.g.rotation.y += p.velH.length() * 0.12 * dt;
+      if (!p.falling) pos.y = floorHeightAt(pos.x, pos.z) + 0.5;
+    }
+    if (p.falling) {
+      p.velY = Math.max(p.velY - 4.5 * dt, -2.4);
+      pos.y += p.velY * dt;
+      p.g.rotation.y += 0.25 * dt;
+      // anything that comes to rest inside the pad footprint is delivered —
+      // the pad surface catches it even where the surrounding sand is higher
+      const inPadXZ = Math.hypot(pos.x - PAD_POS.x, pos.z - PAD_POS.z) < PAD_R;
+      const padTop = PAD_POS.y + 0.95;
+      const rest = inPadXZ
+        ? Math.max(floorHeightAt(pos.x, pos.z) + 0.5, padTop)
+        : floorHeightAt(pos.x, pos.z) + 0.5;
+      if (pos.y <= rest) {
+        p.falling = false;
+        p.velY = 0;
+        if (inPadXZ) {
+          // recovered: pay out, respawn the bomb somewhere new around the site
+          credits += 100;
+          updateCreditsHud();
+          flashClawHud("PAYLOAD RECOVERED +100 CR");
+          spawnFx(pos.clone(), 0x37ff7a, 3, 8);
+          const a = Math.random() * Math.PI * 2;
+          const d = 18 + Math.random() * 28;
+          const nx = siteCenter.x + Math.cos(a) * d;
+          const nz = siteCenter.y + Math.sin(a) * d;
+          pos.set(nx, floorHeightAt(nx, nz) + 0.5, nz);
+          p.velH.set(0, 0, 0);
+        } else {
+          pos.y = rest;
+        }
       }
     }
   }
 
-  // --- dropped crate sinks and settles into the sand ---
-  if (crateFalling) {
-    crateVelY = Math.max(crateVelY - 4.5 * dt, -2.4);
-    crate.position.y += crateVelY * dt;
-    crate.rotation.y += 0.25 * dt;
-    crate.rotation.z += 0.12 * dt;
-    const rest = floorHeightAt(crate.position.x, crate.position.z) + 0.45;
-    if (crate.position.y <= rest) {
-      crate.position.y = rest;
-      crate.rotation.z = 0;
-      crateFalling = false;
-      crateVelY = 0;
+  // --- torpedoes fly, hit terrain or the base ---
+  for (let i = torps.length - 1; i >= 0; i--) {
+    const tp = torps[i];
+    tp.m.position.addScaledVector(tp.vel, dt);
+    tp.life -= dt;
+    const hitGround = tp.m.position.y <= floorHeightAt(tp.m.position.x, tp.m.position.z) + 0.2;
+    const nearBase =
+      baseHp > 0 && tp.m.position.distanceTo(baseGroup.position.clone().add(new THREE.Vector3(0, 1.5, 0))) < 4.4;
+    if (nearBase) hitBase(tp.m.position.clone());
+    if (hitGround && !nearBase) spawnFx(tp.m.position.clone(), 0x9fb4bc, 1.6, 5);
+    if (hitGround || nearBase || tp.life <= 0) {
+      scene.remove(tp.m);
+      torps.splice(i, 1);
     }
   }
 
-  // --- patrol drone: uneven searching orbit around the crate ---
+  // --- transient fx ---
+  for (let i = fxs.length - 1; i >= 0; i--) {
+    const fx = fxs[i];
+    fx.age += dt;
+    fx.s.scale.addScalar(fx.grow * dt);
+    (fx.s.material as THREE.SpriteMaterial).opacity = Math.max(0, 0.9 - fx.age * 1.4);
+    fx.l.intensity = Math.max(0, 120 * (1 - fx.age * 1.6));
+    if (fx.age > 0.9) {
+      scene.remove(fx.s, fx.l);
+      fxs.splice(i, 1);
+    }
+  }
+
+  // base eye pulses while it lives
+  if (baseHp > 0) baseEye.intensity = 20 + Math.abs(Math.sin(t * 1.7)) * 25;
+
+  // --- patrol drone: uneven searching orbit around the bomb site ---
   const orbR = 4.6;
   const dAng = t * 0.26 + Math.sin(t * 0.11) * 1.4;
   drone.position.set(
-    crate.position.x + Math.cos(dAng) * orbR,
+    siteCenter.x + Math.cos(dAng) * orbR,
     siteGroundY + 3.3 + Math.sin(t * 0.5) * 0.35,
-    crate.position.z + Math.sin(dAng) * orbR * 0.72,
+    siteCenter.y + Math.sin(dAng) * orbR * 0.72,
   );
   lookTmp.set(
-    crate.position.x + Math.cos(dAng + 0.14) * orbR,
+    siteCenter.x + Math.cos(dAng + 0.14) * orbR,
     drone.position.y,
-    crate.position.z + Math.sin(dAng + 0.14) * orbR * 0.72,
+    siteCenter.y + Math.sin(dAng + 0.14) * orbR * 0.72,
   );
   drone.lookAt(lookTmp);
   droneChassis.rotation.z = Math.sin(t * 0.35) * 0.06;
@@ -1482,7 +1764,9 @@ function animate(): void {
     outVel.z += -nz * pen * 38 * dt;
   };
   for (const rock of rocks) shove(rock.m.position, rock.r, rock.r * 0.7, rock.vel);
-  if (!carried) shove(crate.position, CRATE_R, 0.6, crateVelH);
+  for (const p of payloads) {
+    if (p !== carried) shove(p.g.position, PAYLOAD_R, 0.55, p.velH);
+  }
 
   mount.getWorldPosition(baseWorld);
   solveIK(baseWorld);
@@ -1699,7 +1983,14 @@ window.addEventListener("resize", () => {
   },
   isCarried: () => carried !== null,
   inRange: () => clawInGrabRange(),
-  cratePos: () => crate.position.toArray(),
-  clawToCrate: () => claw.position.distanceTo(crate.position),
+  cratePos: () => payloads[0].g.position.toArray(),
+  clawToCrate: () => claw.position.distanceTo(payloads[0].g.position),
+  credits: () => credits,
+  baseHp: () => baseHp,
+  fire: () => fireTorpedo(),
+  giveCredits: (n: number) => {
+    credits += n;
+    updateCreditsHud();
+  },
   clawPos: () => claw.position.toArray(),
 };
