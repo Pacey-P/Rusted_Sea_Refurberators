@@ -688,18 +688,26 @@ type Mode = "PILOT" | "MANIPULATOR";
 let mode: Mode = "PILOT";
 
 const keys = new Set<string>();
+let tabDownAt = 0;
 window.addEventListener("keydown", (e) => {
   keys.add(e.code);
   if (e.code === "Tab") {
     e.preventDefault();
-    toggleMode();
+    if (!e.repeat) tabDownAt = performance.now();
   }
   if (e.code === "Space" && mode === "MANIPULATOR") {
     e.preventDefault();
     toggleClaw();
   }
 });
-window.addEventListener("keyup", (e) => keys.delete(e.code));
+window.addEventListener("keyup", (e) => {
+  keys.delete(e.code);
+  if (e.code === "Tab") {
+    // short press: switch mode (arm holds its pose). Long press: stow arm.
+    if (performance.now() - tabDownAt >= 500) stowArm();
+    else toggleMode();
+  }
+});
 
 let orbitYaw = parseFloat(params.get("yaw") ?? "0");
 let orbitPitch = parseFloat(params.get("pitch") ?? "0.12");
@@ -779,24 +787,55 @@ const contactEl = document.getElementById("contact")!;
 const hintPilot = document.getElementById("hintPilot")!;
 const hintManip = document.getElementById("hintManip")!;
 
-function toggleMode(): void {
-  mode = mode === "PILOT" ? "MANIPULATOR" : "PILOT";
+// The arm holds its pose across mode switches (stored sub-relative so it
+// rides along while you fly). Only an explicit long-press stow retracts it.
+let armStowed = true; // starts folded
+const heldLocal = new THREE.Vector3();
+
+function setMode(m: Mode): void {
+  mode = m;
   modeEl.textContent = mode;
   hintPilot.style.display = mode === "PILOT" ? "" : "none";
   hintManip.style.display = mode === "MANIPULATOR" ? "" : "none";
+}
+function toggleMode(): void {
   if (mode === "MANIPULATOR") {
-    // start the arm at a natural work position ahead of and below the bow,
-    // not wherever a stale target happens to be
-    forward.set(Math.sin(sub.yaw), 0, Math.cos(sub.yaw));
-    armTarget
-      .copy(sub.pos)
-      .addScaledVector(forward, 2.4)
-      .add(new THREE.Vector3(0, -1.6, 0));
+    // freeze the pose relative to the sub — it rides along in PILOT
+    subGroup.updateMatrixWorld();
+    heldLocal.copy(subGroup.worldToLocal(armTarget.clone()));
+    setMode("PILOT");
+  } else {
+    if (armStowed) {
+      // waking from stow: start at a natural work position at the bow
+      forward.set(Math.sin(sub.yaw), 0, Math.cos(sub.yaw));
+      armTarget
+        .copy(sub.pos)
+        .addScaledVector(forward, 2.4)
+        .add(new THREE.Vector3(0, -1.6, 0));
+      armStowed = false;
+    } else {
+      // resume exactly where the arm was left, in sub space
+      subGroup.updateMatrixWorld();
+      armTarget.copy(subGroup.localToWorld(heldLocal.clone()));
+    }
     mouseDirty = false;
+    setMode("MANIPULATOR");
   }
+}
+function stowArm(): void {
+  armStowed = true;
+  if (mode === "MANIPULATOR") setMode("PILOT");
+  flashClawHud("ARM STOWED");
+}
+
+let clawFlashUntil = 0;
+function flashClawHud(msg: string): void {
+  clawHud.textContent = msg;
+  clawFlashUntil = performance.now() + 1200;
 }
 function toggleClaw(): void {
   clawClosed = !clawClosed;
+  clawFlashUntil = 0;
   clawHud.textContent = clawClosed ? "CLAW CLOSED" : "CLAW OPEN";
   clawHud.classList.toggle("closed", clawClosed);
 }
@@ -814,6 +853,8 @@ const TURN = 1.4;
 const DRAG = 0.55;
 let throttle = 0; // |thrust input|, drives prop spin + wake turbulence
 let propSpin = 0;
+let padYWas = false; // gamepad Y long-press tracking
+let padYTime = 0;
 
 // ------------------------------------------------------------------- post ---
 const composer = new EffectComposer(renderer);
@@ -879,7 +920,15 @@ function animate(): void {
 
   const pad = readPad();
   if (pad) {
-    if (pad.pressed(3)) toggleMode(); // Y
+    // Y: short press toggles mode, long press (>=0.5s) stows the arm
+    const yNow = pad.held(3);
+    if (yNow) padYTime += dt;
+    else if (padYWas) {
+      if (padYTime >= 0.5) stowArm();
+      else toggleMode();
+      padYTime = 0;
+    } else padYTime = 0;
+    padYWas = yNow;
     if (pad.pressed(0) && mode === "MANIPULATOR") toggleClaw(); // A
     orbitYaw -= pad.rx * 2.2 * dt;
     orbitPitch = THREE.MathUtils.clamp(orbitPitch + pad.ry * 1.5 * dt, -0.5, 0.9);
@@ -1021,13 +1070,18 @@ function animate(): void {
       armTarget.copy(baseWorld).addScaledVector(off.normalize(), TOTAL * 1.15);
     }
     armTarget.y = Math.max(armTarget.y, floorY + 0.55);
-  } else {
-    // PILOT: arm folds in under the bow
+  } else if (armStowed) {
+    // PILOT, stowed: arm folds in under the bow
     mount.getWorldPosition(baseWorld);
     armTarget
       .copy(baseWorld)
       .addScaledVector(forward, 0.7)
       .add(new THREE.Vector3(0, -0.55 + Math.sin(t * 0.5) * 0.06, 0));
+  } else {
+    // PILOT, pose held: the arm rides along with the sub, exactly where
+    // the operator left it
+    subGroup.updateMatrixWorld();
+    armTarget.copy(subGroup.localToWorld(heldLocal.clone()));
   }
   smoothedTarget.lerp(armTarget, 1 - Math.exp(-8 * dt));
 
@@ -1117,6 +1171,12 @@ function animate(): void {
   causticsMat.uniforms.time.value = t;
   causticsMat.uniforms.camPos.value.copy(camera.position);
   underwaterPass.uniforms.time.value = t;
+
+  // restore claw HUD after a transient flash (e.g. "ARM STOWED")
+  if (clawFlashUntil && performance.now() > clawFlashUntil) {
+    clawFlashUntil = 0;
+    clawHud.textContent = clawClosed ? "CLAW CLOSED" : "CLAW OPEN";
+  }
 
   // --- HUD readouts (real values from the sim now) ---
   depthEl.textContent = (312.4 - sub.pos.y * 1.8).toFixed(1) + " M";
