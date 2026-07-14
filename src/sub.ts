@@ -696,7 +696,12 @@ function solveIK(base: THREE.Vector3): void {
   const t = smoothedTarget.clone();
   const d = t.distanceTo(base);
   if (d > TOTAL * 0.995) {
-    t.copy(base).addScaledVector(t.sub(base).normalize(), TOTAL * 0.995);
+    // compute the direction BEFORE t.copy(base) — chaining t.sub(base) as
+    // the argument evaluated after the copy, yielding a zero direction: the
+    // clamped target became the shoulder itself and the arm folded back
+    // through the hull at full extension
+    const dir = t.clone().sub(base).normalize();
+    t.copy(base).addScaledVector(dir, TOTAL * 0.995);
   }
   // degenerate-direction guard: normalize(0,0,0) is NaN, and one NaN joint
   // makes the whole arm vanish
@@ -1471,4 +1476,5 @@ window.addEventListener("resize", () => {
   inRange: () => clawInGrabRange(),
   cratePos: () => crate.position.toArray(),
   clawToCrate: () => claw.position.distanceTo(crate.position),
+  clawPos: () => claw.position.toArray(),
 };
