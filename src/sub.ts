@@ -36,7 +36,7 @@ document.body.appendChild(renderer.domElement);
 const WATER = new THREE.Color("#03121c");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#020a12");
-scene.fog = new THREE.FogExp2(WATER, 0.072);
+scene.fog = new THREE.FogExp2(WATER, 0.05);
 
 const camera = new THREE.PerspectiveCamera(
   55,
@@ -162,6 +162,8 @@ let navLight: THREE.Mesh;
 // Beams are shader cones: brightness fades along the length AND at the
 // grazing rim, with a slow shimmer — light scattering through water, not
 // crisp geometry.
+const FLOOD_BASE = 520; // candela at 100% floods
+let floodLevel = 1; // player-set floods: 0..1 in 25% steps (bumpers)
 const beamMats: THREE.ShaderMaterial[] = [];
 const floodLamps: THREE.SpotLight[] = [];
 const floodHalos: THREE.SpriteMaterial[] = [];
@@ -229,7 +231,9 @@ function floodlight(y: number, z: number): void {
   housing.rotation.z = Math.PI / 2 - 0.35;
   housing.position.set(3.02, y, z);
   hullGroup.add(housing);
-  const lamp = new THREE.SpotLight(0xffd9a0, 2800, 170, 0.48, 0.55, 1.4);
+  // decay 0.85 + lower intensity = flatter falloff: the near-field ground
+  // pool drops ~50% while 30u+ throw actually increases. Width unchanged.
+  const lamp = new THREE.SpotLight(0xffd9a0, FLOOD_BASE, 170, 0.48, 0.55, 0.85);
   lamp.position.set(3.14, y, z);
   lamp.castShadow = true;
   lamp.shadow.mapSize.set(512, 512);
@@ -275,23 +279,31 @@ function floodlight(y: number, z: number): void {
 floodlight(0.35, 0.45);
 floodlight(0.35, -0.45);
 
-// landing skids — helicopter-style rails so she can set down on the bottom.
-// Kept aft of the arm's workspace (shoulder is at x=1.9).
+// landing skids — helicopter-style: two rails joined by cross-tubes that
+// run under the belly, with central struts rooted INSIDE the hull skin so
+// every member visibly connects (overlap, not tangency). Aft of the arm.
 {
   for (const side of [-1, 1]) {
     const rail = addShadow(new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 3.2, 4, 8), trimMat));
     rail.rotation.z = Math.PI / 2; // capsule axis onto X
     rail.position.set(-0.4, -1.32, side * 0.72);
     hullGroup.add(rail);
-    // slightly splayed struts, two per rail
-    for (const sx of [-1.7, 0.9]) {
-      const strut = addShadow(
-        new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.8, 8), trimMat),
-      );
-      strut.position.set(sx, -0.92, side * 0.62);
-      strut.rotation.x = side * 0.22;
-      hullGroup.add(strut);
-    }
+  }
+  for (const sx of [-1.7, 0.9]) {
+    // cross-tube: spans rail to rail at rail height
+    const tube = addShadow(
+      new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 1.66, 8), trimMat),
+    );
+    tube.rotation.x = Math.PI / 2; // axis onto Z
+    tube.position.set(sx, -1.3, 0);
+    hullGroup.add(tube);
+    // central strut: top buried in the hull (bottom of hull is y=-.85 here),
+    // bottom overlapping the cross-tube
+    const strut = addShadow(
+      new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.66, 8), trimMat),
+    );
+    strut.position.set(sx, -0.99, 0);
+    hullGroup.add(strut);
   }
 }
 
@@ -1140,6 +1152,15 @@ function animate(): void {
     }
     padYWas = yNow;
     if (pad.pressed(0)) toggleClaw(); // A — grip, in either mode
+    // bumpers step the floods in 25% notches: LB dims, RB brightens
+    if (pad.pressed(4)) {
+      floodLevel = Math.max(0, floodLevel - 0.25);
+      flashClawHud(`FLOODS ${Math.round(floodLevel * 100)}%`);
+    }
+    if (pad.pressed(5)) {
+      floodLevel = Math.min(1, floodLevel + 0.25);
+      flashClawHud(`FLOODS ${Math.round(floodLevel * 100)}%`);
+    }
     orbitYaw -= pad.rx * 2.2 * dt;
     orbitPitch = THREE.MathUtils.clamp(orbitPitch + pad.ry * 1.5 * dt, -0.5, 0.9);
   }
@@ -1519,17 +1540,17 @@ function animate(): void {
       0.045 + shallow * 0.24,
       0.065 + shallow * 0.3,
     );
-    fog.density = 0.03 + df * 0.055;
+    fog.density = 0.021 + df * 0.0385; // ~30% clearer water across the board
     (scene.background as THREE.Color).copy(fog.color);
     surfaceMat.uniforms.uFade.value = shallow * shallow;
 
-    // headlights auto-dim in daylight (nobody runs floods at noon) — this
-    // keeps additive halos/bulbs/beams from blowing out the sunlit shallows
-    // while leaving the deep-water look untouched
-    const lightScale = 0.12 + df * 0.88;
-    for (const l of floodLamps) l.intensity = 2800 * lightScale;
+    // headlights: player floods setting × daylight auto-dim (nobody runs
+    // floods at noon) — keeps additive halos/bulbs/beams from blowing out
+    // the sunlit shallows while leaving the deep-water look untouched
+    const lightScale = floodLevel * (0.12 + df * 0.88);
+    for (const l of floodLamps) l.intensity = FLOOD_BASE * lightScale;
     for (const h of floodHalos) h.opacity = 0.55 * lightScale;
-    for (const b of floodBulbs) b.color.setScalar(0.45 + 0.55 * lightScale);
+    for (const b of floodBulbs) b.color.setScalar(0.3 + 0.7 * lightScale);
     for (const m of beamMats) m.uniforms.uScale.value = lightScale;
     bloom.strength = 0.14 + 0.31 * df;
   }
