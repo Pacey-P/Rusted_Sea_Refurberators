@@ -301,6 +301,18 @@ hullGroup.add(shoulderBall);
 
 // --------------------------------------------------------------- seafloor ---
 const floorY = -6.5;
+// world-space terrain height (must mirror the displacement below; the plane
+// is rotated -90° about X, so world z maps to plane -y)
+function floorHeightAt(wx: number, wz: number): number {
+  const x = wx;
+  const y = -wz;
+  return (
+    floorY +
+    Math.sin(x * 0.22) * Math.cos(y * 0.18) * 0.9 +
+    Math.sin(x * 0.05 + y * 0.07) * 1.6 +
+    Math.sin(x * 1.3) * Math.sin(y * 1.1) * 0.12
+  );
+}
 {
   const g = new THREE.PlaneGeometry(300, 300, 160, 160);
   const pos = g.attributes.position as THREE.BufferAttribute;
@@ -406,6 +418,19 @@ let beaconLight: THREE.PointLight;
   crate.position.set(2.6, floorY + 1.15, 2.2);
   crate.rotation.y = 0.5;
   scene.add(crate);
+}
+
+// ------------------------------------------------------------- grab state ---
+const GRAB_RANGE = 1.2; // forgiving: claw within this of the crate can grip it
+let carried: THREE.Group | null = null;
+let crateFalling = false;
+let crateVelY = 0;
+const crateWorld = new THREE.Vector3();
+
+function clawInGrabRange(): boolean {
+  if (carried) return false;
+  crate.getWorldPosition(crateWorld);
+  return claw.position.distanceTo(crateWorld) < GRAB_RANGE;
 }
 
 // distant wreck silhouette (Sea Major glb, half-buried set dressing)
@@ -840,10 +865,29 @@ function flashClawHud(msg: string): void {
   clawHud.textContent = msg;
   clawFlashUntil = performance.now() + 1200;
 }
+function clawText(): string {
+  if (carried) return "CLAW CLOSED · PAYLOAD";
+  return clawClosed ? "CLAW CLOSED" : "CLAW OPEN";
+}
 function toggleClaw(): void {
   clawClosed = !clawClosed;
-  clawFlashUntil = 0;
-  clawHud.textContent = clawClosed ? "CLAW CLOSED" : "CLAW OPEN";
+  if (clawClosed && clawInGrabRange()) {
+    // grip: the crate becomes part of the claw, world pose preserved
+    claw.attach(crate);
+    carried = crate;
+    crateFalling = false;
+    flashClawHud("PAYLOAD SECURED");
+  } else if (!clawClosed && carried) {
+    // release: back into the world, then gravity takes it
+    scene.attach(carried);
+    carried = null;
+    crateFalling = true;
+    crateVelY = 0;
+    flashClawHud("PAYLOAD RELEASED");
+  } else {
+    clawFlashUntil = 0;
+    clawHud.textContent = clawText();
+  }
   clawHud.classList.toggle("closed", clawClosed);
 }
 
@@ -959,13 +1003,16 @@ function animate(): void {
     }
   }
   throttle = THREE.MathUtils.lerp(throttle, Math.min(1, Math.abs(thrust)), 1 - Math.exp(-5 * dt));
-  sub.yawVel += turn * TURN * dt;
+  // a secured payload makes the boat heavy: sluggish thrust, lazy turns
+  const heavy = carried ? 0.6 : 1;
+  sub.yawVel += turn * TURN * heavy * dt;
   sub.yawVel *= Math.exp(-2.2 * dt);
   sub.yaw += sub.yawVel * dt * 60 * 0.02;
 
   forward.set(Math.sin(sub.yaw), 0, Math.cos(sub.yaw));
-  sub.vel.addScaledVector(forward, thrust * THRUST * dt);
-  sub.vel.y += vert * VTHRUST * dt;
+  sub.vel.addScaledVector(forward, thrust * THRUST * heavy * dt);
+  sub.vel.y += vert * VTHRUST * (carried ? 0.7 : 1) * dt;
+  if (carried) sub.vel.y -= 0.5 * dt; // the payload wants the bottom
   sub.vel.multiplyScalar(Math.exp(-DRAG * dt));
   sub.pos.addScaledVector(sub.vel, dt);
   sub.pos.y = Math.min(sub.pos.y, 8);
@@ -991,10 +1038,39 @@ function animate(): void {
     t % 1.4 < 0.15 ? 0xff5040 : 0x3a1210, // anticollision beacon, dim red
   );
 
-  // --- beacon blink ---
-  const blink = t % 1.1 < 0.12;
-  (beacon.material as THREE.MeshBasicMaterial).color.setHex(blink ? 0xffc878 : 0x4a361f);
-  beaconLight.intensity = blink ? 10 : 0;
+  // --- beacon: red blink normally; GREEN when the claw is in grab range;
+  // steady soft green while carried ---
+  const inRange = clawInGrabRange();
+  if (carried) {
+    (beacon.material as THREE.MeshBasicMaterial).color.setHex(0x1f8a4a);
+    beaconLight.color.setHex(0x35ff70);
+    beaconLight.intensity = 2.5;
+  } else if (inRange) {
+    const gblink = t % 0.35 < 0.2; // eager fast green: "you can take it"
+    (beacon.material as THREE.MeshBasicMaterial).color.setHex(gblink ? 0x4dff85 : 0x134a26);
+    beaconLight.color.setHex(0x35ff70);
+    beaconLight.intensity = gblink ? 12 : 2;
+  } else {
+    const blink = t % 1.1 < 0.12;
+    (beacon.material as THREE.MeshBasicMaterial).color.setHex(blink ? 0xff5040 : 0x4a1712);
+    beaconLight.color.setHex(0xff4030);
+    beaconLight.intensity = blink ? 10 : 0;
+  }
+
+  // --- dropped crate sinks and settles into the sand ---
+  if (crateFalling) {
+    crateVelY = Math.max(crateVelY - 4.5 * dt, -2.4);
+    crate.position.y += crateVelY * dt;
+    crate.rotation.y += 0.25 * dt;
+    crate.rotation.z += 0.12 * dt;
+    const rest = floorHeightAt(crate.position.x, crate.position.z) + 0.45;
+    if (crate.position.y <= rest) {
+      crate.position.y = rest;
+      crate.rotation.z = 0;
+      crateFalling = false;
+      crateVelY = 0;
+    }
+  }
 
   // --- patrol drone: uneven searching orbit around the crate ---
   const orbR = 4.6;
@@ -1182,7 +1258,7 @@ function animate(): void {
   // restore claw HUD after a transient flash (e.g. "ARM STOWED")
   if (clawFlashUntil && performance.now() > clawFlashUntil) {
     clawFlashUntil = 0;
-    clawHud.textContent = clawClosed ? "CLAW CLOSED" : "CLAW OPEN";
+    clawHud.textContent = clawText();
   }
 
   // --- HUD readouts (real values from the sim now) ---
@@ -1215,3 +1291,16 @@ window.addEventListener("resize", () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
   composer.setSize(window.innerWidth, window.innerHeight);
 });
+
+// dev-only handle for automated verification (scripts/verify_grab.mjs)
+(window as unknown as Record<string, unknown>).__dbg = {
+  setSubPos: (x: number, y: number, z: number) => {
+    sub.pos.set(x, y, z);
+    sub.vel.set(0, 0, 0);
+  },
+  setArmTarget: (x: number, y: number, z: number) => {
+    armTarget.set(x, y, z);
+  },
+  isCarried: () => carried !== null,
+  inRange: () => clawInGrabRange(),
+};
